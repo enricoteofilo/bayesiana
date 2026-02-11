@@ -104,6 +104,6 @@ if __name__ == "__main__":
     results = ns.to_results(termination_reason, state=state)
     ns.summary(results)
     ns.plot_diagnostics(results)
-    ns.plot_cornerplot(results, save_name='/results/gaussian_full_corner.png', dpi=800)
+    ns.plot_cornerplot(results, save_name='/results/gaussian_full_corner.png')
 
     exit()
