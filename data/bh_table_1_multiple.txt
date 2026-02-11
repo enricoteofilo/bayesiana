@@ -1,0 +1,5 @@
+#Galaxy #M  #dM_low #dM_high #sigma_gc #sigma_gc_low #sigma_gc_high
+NGC 1399    1.3e9   0.66e9  0.5e9   274 9   9
+NGC 1399    5.1e8   0.7e8   0.7e8   274 9   9
+NGC 5128    3.0e8   0.2e8   0.4e8   150 2   2
+NGC 5128    7.0e7   3.8e7   1.3e7   150 2   2
