@@ -14,6 +14,7 @@ grad = jax.grad
 jit = jax.jit
 vmap = jax.vmap
 from jaxns import Prior, Model, NestedSampler
+from jaxns import resample
 import tensorflow_probability.substrates.jax as tfp
 tfpd = tfp.distributions
 import matplotlib.pyplot as plt
@@ -102,8 +103,13 @@ if __name__ == "__main__":
     ns = NestedSampler(model, s=1000, k=model.U_ndims, num_live_points=model.U_ndims*1000)
     termination_reason, state = jax.jit(ns)(random.PRNGKey(2))
     results = ns.to_results(termination_reason, state=state)
+    np.savez("results/asymmetric_ns_results.npz",
+         log_Z=np.asarray(results.log_Z_estimate),
+         log_L=np.asarray(results.log_L_samples),
+         U=np.asarray(results.U_samples))
+    #posterior = resample(random.PRNGKey(1), results, S=5000)
     ns.summary(results)
     ns.plot_diagnostics(results)
-    ns.plot_cornerplot(results, save_name='/results/gaussian_full_corner.png')
+    ns.plot_cornerplot(results, save_name='results/asymmetric_full_corner.png')
 
     exit()

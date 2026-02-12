@@ -99,11 +99,16 @@ if __name__ == "__main__":
     model = Model(prior_model_normal, log_likelihood_normal)
     model.sanity_check(random.PRNGKey(0), S=10)
 
-    ns = NestedSampler(model, s=1000, k=model.U_ndims, num_live_points=model.U_ndims*1000)
+    ns = NestedSampler(model, s=1000, k=model.U_ndims, num_live_points=model.U_ndims*2000)
     termination_reason, state = jax.jit(ns)(random.PRNGKey(2))
     results = ns.to_results(termination_reason, state=state)
+    np.savez("results/gaussian_ns_results.npz",
+         log_Z=np.asarray(results.log_Z_estimate),
+         log_L=np.asarray(results.log_L_samples),
+         U=np.asarray(results.U_samples))
+    #posterior = resample(random.PRNGKey(1), results, S=5000)
     ns.summary(results)
     ns.plot_diagnostics(results)
-    ns.plot_cornerplot(results, save_name='/results/gaussian_full_corner.png', dpi=800)
+    ns.plot_cornerplot(results, save_name='/results/gaussian_full_corner.png')
 
     exit()
