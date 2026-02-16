@@ -14,6 +14,8 @@ grad = jax.grad
 jit = jax.jit
 vmap = jax.vmap
 import pickle
+import tensorflow_probability.substrates.jax as tfp
+tfpd = tfp.distributions
 
 def function_pair(callable_1, callable_2, x, y, a, b, A_target, B_target):
     """
@@ -78,3 +80,17 @@ def save_nested_sampler_results(results, output_path: str) -> None:
 def load_nested_sampler_results(input_path: str):
     with Path(input_path).open("rb") as f:
         return pickle.load(f)
+    
+def skewnorm_cdf(x, mean=0.0, scale=1.0, shape=0.0, name=None):
+    z = (x - mean) / scale + shape * jnp.sqrt(2 / jnp.pi) / jnp.sqrt(1 + shape**2)
+    return jsp.stats.norm.cdf(z, loc=0.0, scale=1.0)-2*tfp.math.owens_t(z,shape, name=name)
+
+def logskewnorm_logpdf(x, loc=0.0, scale=1.0, shape=0.0):
+    z = (jnp.log(x) - loc) / scale + shape * jnp.sqrt(2 / jnp.pi) / jnp.sqrt(1 + shape**2)
+    return tfpd.Normal(loc - scale*shape * jnp.sqrt(2 / jnp.pi) / jnp.sqrt(1 + shape**2), scale).log_prob(jnp.log(x)) -jnp.log(x) + jnp.log(2.0) + jnp.log(jsp.stats.norm.cdf(shape * z))
+
+def skewnorm_logpdf(x, mean=0.0, sigma=1.0, shape=0.0):
+    loc = mean
+    scale = sigma/np.sqrt(1 - 2*(shape**2)/(np.pi*(1+shape**2)))
+    z = (x - loc) / scale + shape * jnp.sqrt(2 / jnp.pi) / jnp.sqrt(1 + shape**2)
+    return tfpd.Normal(loc - scale*shape * jnp.sqrt(2 / jnp.pi) / jnp.sqrt(1 + shape**2), scale).log_prob(x) -jnp.log(scale) + jnp.log(2.0) + jnp.log(jsp.stats.norm.cdf(shape * z))

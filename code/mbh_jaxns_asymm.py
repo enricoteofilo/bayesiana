@@ -18,7 +18,7 @@ from jaxns import Prior, Model, NestedSampler
 import tensorflow_probability.substrates.jax as tfp
 tfpd = tfp.distributions
 import matplotlib.pyplot as plt
-from utils import save_nested_sampler_results, load_nested_sampler_results
+from utils import save_nested_sampler_results, load_nested_sampler_results, logskewnorm_logpdf, skewnorm_cdf
 
 DEBUG = False
 
@@ -52,19 +52,6 @@ def import_bh_data(fname: str) -> dict:
 def linear_correlation_exp(sigma_gc, a, b):
     return jnp.power(10.0, b) * jnp.power(sigma_gc/200.0, a)
 
-
-@jit
-def scipy_skewnorm_logpdf(x, shape, loc, scale):
-    scale = jnp.clip(scale, 1e-12, jnp.inf)
-    z = (x - loc) / scale
-    return (
-        jnp.log(2.0)
-        - jnp.log(scale)
-        - 0.5 * z * z
-        - 0.5 * jnp.log(2.0 * jnp.pi)
-        + jsp.stats.norm.logcdf(shape * z)
-    )
-
 if __name__ == "__main__":
     bh_data = import_bh_data("data/bh_table_1.txt")
     print(f"Loaded columns: {list(bh_data.keys())}")
@@ -75,36 +62,25 @@ if __name__ == "__main__":
             except:
                 print(f"{key} type: {type(bh_data[key][0])}")
 
-    print(bh_data["sigma_gc"])
-    print(bh_data["M"])
-
     M = bh_data["M"]
     sigma_gc = bh_data["sigma_gc"]
-    M_low_err = bh_data["dM_low"]
-    M_high_err = bh_data["dM_high"]
+    M_equiv_err = 0.5*(bh_data["dM_low"]+bh_data["dM_high"])
     sigma_gc_equiv_err = 0.5*(bh_data["sigma_gc_low"]+bh_data["sigma_gc_high"])
     N_bh = len(M)
 
-    eps = 1e-12
-    M_safe = jnp.clip(M, eps, jnp.inf)
-    M_left = jnp.clip(M - M_low_err, eps, jnp.inf)
-    M_right = jnp.clip(M + M_high_err, eps, jnp.inf)
-
-    log_M = jnp.log(M_safe)
-    log_sigma_low = log_M - jnp.log(M_left)
-    log_sigma_high = jnp.log(M_right) - log_M
-    log_M_scale = 0.5 * (log_sigma_low + log_sigma_high)
-    log_M_shape = 5.0 * (log_sigma_high - log_sigma_low) / (log_sigma_high + log_sigma_low + eps)
+    M_logskew_alpha = jnp.zeros_like(M)
+    sigma_logskew_alpha = jnp.zeros_like(M)
+    M_logskew_scale = jnp.log(M_equiv_err)
+    sigma_logskew_scale = jnp.log(sigma_gc_equiv_err)
 
     @jit
     def log_likelihood_logskewnormal(a, b, true_sigma_gc):
         M_max = 1.0e+12
         predicted_M = linear_correlation_exp(true_sigma_gc, a, b)
-        in_bounds = jnp.all((predicted_M > 0.0) & (predicted_M <= M_max))
-        log_predicted_M = jnp.log(jnp.clip(predicted_M, eps, jnp.inf))
+        in_bounds = jnp.all((predicted_M >= 0.0) & (predicted_M <= M_max))
         log_like = jnp.sum(
-            scipy_skewnorm_logpdf(log_M, log_M_shape, log_predicted_M, log_M_scale)
-            + tfpd.Normal(true_sigma_gc, sigma_gc_equiv_err).log_prob(sigma_gc)
+            logskewnorm_logpdf(M, mean=jnp.log(predicted_M), scale=M_logskew_scale, shape=M_logskew_alpha)
+            + logskewnorm_logpdf(sigma_gc, mean=jnp.log(predicted_M), scale=sigma_logskew_scale, shape=sigma_logskew_alpha)
         ) - N_bh * jnp.log(M_max)
         return jnp.where(in_bounds, log_like, -jnp.inf)
     
