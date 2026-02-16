@@ -18,7 +18,8 @@ from jaxns import Prior, Model, NestedSampler
 import tensorflow_probability.substrates.jax as tfp
 tfpd = tfp.distributions
 import matplotlib.pyplot as plt
-from mbh_jaxns_normal import save_nested_sampler_results, load_nested_sampler_results, linear_correlation_exp, import_bh_data
+from utils import function_pair, newton_solver, save_nested_sampler_results, load_nested_sampler_results
+from mbh_jaxns_normal import linear_correlation_exp, import_bh_data
 
 DEBUG = False
 
@@ -32,29 +33,28 @@ if __name__ == "__main__":
             except:
                 print(f"{key} type: {type(bh_data[key][0])}")
 
+    print(bh_data["sigma_gc"])
+    print(bh_data["M"])
+    
     M = bh_data["M"]
     sigma_gc = bh_data["sigma_gc"]
     M_equiv_err = 0.5*(bh_data["dM_low"]+bh_data["dM_high"])
     sigma_gc_equiv_err = 0.5*(bh_data["sigma_gc_low"]+bh_data["sigma_gc_high"])
     N_bh = len(M)
 
-    @jit
-    def log_likelihood_normal(a, b, true_sigma_gc):
-        M_max = 1.0e+12
-        return jnp.sum(tfpd.Normal(linear_correlation_exp(true_sigma_gc, a, b), M_equiv_err).log_prob(M)+
-        tfpd.Normal(true_sigma_gc, sigma_gc_equiv_err).log_prob(sigma_gc)) - N_bh * jnp.log(M_max)
-    
-    def prior_model_normal():
-        a = yield Prior(tfpd.Uniform(-10.0, 10.0), name="a")
-        b = yield Prior(tfpd.Uniform(-5.0, 5.0), name="b")
-        true_sigma_gc = yield Prior(tfpd.Sample(tfpd.Uniform(1.0e-14, 5.0e+3), sample_shape=(N_bh,)), name="true_sigma_gc")
-        return a, b, true_sigma_gc
-    
-    model = Model(prior_model_normal, log_likelihood_normal)
-    model.sanity_check(random.PRNGKey(0), S=10)
-
-    bh_ns = load_nested_sampler_results("results/gaussian_ns_results.pkl")
-    ns = NestedSampler(model, s=1000, k=model.U_ndims, num_live_points=model.U_ndims*100000)
-    ns.plot_cornerplot(bh_ns, save_name='results/gaussian_full_corner.png')
+    plt.figure('bh_data', figsize=(6, 4), dpi=600)
+    plt.title(r'Acquired data for $M_{BH}-\sigma_{gc}$ correlation')
+    plt.errorbar(bh_data["sigma_gc"], bh_data["M"], xerr=[bh_data["sigma_gc_low"], bh_data["sigma_gc_high"]], 
+                 yerr=[bh_data["dM_low"], bh_data["dM_high"]], fmt='.', label='Observed Data', 
+                 markersize=4.0, capsize=2.0, linestyle='None', color='black', alpha=0.95)
+    plt.xlabel(r'$\sigma_{gc}$ [km/s]')
+    plt.ylabel(r'$M_{bh}$ [$M_\odot$]')
+    plt.legend(loc='best')
+    plt.xlim(50, 500)
+    plt.ylim(1e6, 1e10)
+    plt.xscale('log')
+    plt.yscale('log')
+    plt.savefig('figures/bh_data.png')
+    plt.close()
 
     exit()

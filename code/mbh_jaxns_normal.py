@@ -18,20 +18,9 @@ from jaxns import Prior, Model, NestedSampler
 import tensorflow_probability.substrates.jax as tfp
 tfpd = tfp.distributions
 import matplotlib.pyplot as plt
+from utils import save_nested_sampler_results, load_nested_sampler_results
 
 DEBUG = False
-
-
-def save_nested_sampler_results(results, output_path: str) -> None:
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("wb") as f:
-        pickle.dump(results, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-
-def load_nested_sampler_results(input_path: str):
-    with Path(input_path).open("rb") as f:
-        return pickle.load(f)
 
 def import_bh_data(fname: str) -> dict:
 
@@ -61,7 +50,7 @@ def import_bh_data(fname: str) -> dict:
 
 @jit
 def linear_correlation_exp(sigma_gc, a, b):
-    return jnp.exp(b) * jnp.power(sigma_gc/200.0, a)
+    return jnp.power(10.0, b) * jnp.power(sigma_gc/200.0, a)
 
 if __name__ == "__main__":
     bh_data = import_bh_data("data/bh_table_1.txt")
@@ -75,21 +64,6 @@ if __name__ == "__main__":
 
     print(bh_data["sigma_gc"])
     print(bh_data["M"])
-
-    plt.figure('bh_data', figsize=(6, 4), dpi=600)
-    plt.title(r'Acquired data for $M_{BH}-\sigma_{gc}$ correlation')
-    plt.errorbar(bh_data["sigma_gc"], bh_data["M"], xerr=[bh_data["sigma_gc_low"], bh_data["sigma_gc_high"]], 
-                 yerr=[bh_data["dM_low"], bh_data["dM_high"]], fmt='.', label='Observed Data', 
-                 markersize=4.0, capsize=2.0, linestyle='None', color='black', alpha=0.95)
-    plt.xlabel(r'$\sigma_{gc}$ [km/s]')
-    plt.ylabel(r'$M_{bh}$ [$M_\odot$]')
-    plt.legend(loc='best')
-    plt.xlim(50, 500)
-    plt.ylim(1e6, 1e10)
-    plt.xscale('log')
-    plt.yscale('log')
-    plt.savefig('figures/bh_data.png')
-    plt.close()
 
     M = bh_data["M"]
     sigma_gc = bh_data["sigma_gc"]

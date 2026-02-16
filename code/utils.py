@@ -13,6 +13,7 @@ random = jax.random
 grad = jax.grad
 jit = jax.jit
 vmap = jax.vmap
+import pickle
 
 def function_pair(callable_1, callable_2, x, y, a, b, A_target, B_target):
     """
@@ -67,3 +68,13 @@ def newton_solver(callable_1, callable_2, guess_tuple, a, b, A_target, B_target,
     v_final, _, _ = jax.lax.while_loop(cond, one_step, init_state)
     return v_final
 
+def save_nested_sampler_results(results, output_path: str) -> None:
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("wb") as f:
+        pickle.dump(results, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def load_nested_sampler_results(input_path: str):
+    with Path(input_path).open("rb") as f:
+        return pickle.load(f)
