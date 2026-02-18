@@ -18,35 +18,9 @@ from jaxns import Prior, Model, NestedSampler
 import tensorflow_probability.substrates.jax as tfp
 tfpd = tfp.distributions
 import matplotlib.pyplot as plt
-from utils import save_nested_sampler_results, load_nested_sampler_results
+from utils import save_nested_sampler_results, load_nested_sampler_results, import_bh_data
 
 DEBUG = False
-
-def import_bh_data(fname: str) -> dict:
-
-    structured = np.genfromtxt(
-        fname,
-        names=True,
-        dtype=None,
-        encoding="utf-8",
-        delimiter=",",
-    )
-
-    if DEBUG:
-        print("Loading file with `np.genfromtxt`:\n", structured)
-        print("Data types:", structured.dtype)
-        print("Column names:", structured.dtype.names)
-
-    dict = {}
-    for name in structured.dtype.names:
-        key = name.lstrip("#")
-        values = structured[name]
-        if np.issubdtype(values.dtype, np.number):
-            dict[key] = jnp.asarray(values, dtype=jnp.float64)
-        else:
-            dict[key] = values.tolist()
-
-    return dict
 
 @jit
 def linear_correlation_exp(sigma_gc, a, b):

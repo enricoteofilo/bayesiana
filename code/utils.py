@@ -23,6 +23,7 @@ _TWO_OVER_PI = 2.0 / jnp.pi
 _SQRT_TWO_OVER_PI = jnp.sqrt(2.0 / jnp.pi)
 _LOG_2PI = jnp.log(2.0 * jnp.pi)
 _LOG_2 = jnp.log(2.0)
+DEBUG = False
 
 def function_pair(callable_1, callable_2, x, y, a, b, A_target, B_target):
     """
@@ -180,6 +181,34 @@ def solve_logskewnormal_from_mean_and_bounds(measured_mean, M, deltaM_low, delta
         "message": result.message,
     }
     return jnp.array([mean_sol, sigma_sol, shape_sol]), info
+
+
+
+def import_bh_data(fname: str) -> dict:
+
+    structured = np.genfromtxt(
+        fname,
+        names=True,
+        dtype=None,
+        encoding="utf-8",
+        delimiter=",",
+    )
+
+    if DEBUG:
+        print("Loading file with `np.genfromtxt`:\n", structured)
+        print("Data types:", structured.dtype)
+        print("Column names:", structured.dtype.names)
+
+    dict = {}
+    for name in structured.dtype.names:
+        key = name.lstrip("#")
+        values = structured[name]
+        if np.issubdtype(values.dtype, np.number):
+            dict[key] = jnp.asarray(values, dtype=jnp.float64)
+        else:
+            dict[key] = values.tolist()
+
+    return dict
 
 def save_nested_sampler_results(results, output_path: str) -> None:
     output = Path(output_path)
