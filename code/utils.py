@@ -4,6 +4,7 @@ from pathlib import Path
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_PLATFORM_NAME", "cpu")
 import numpy as np
+import scipy.optimize as sp_opt
 import jax
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_platform_name", "cpu")
@@ -16,6 +17,7 @@ vmap = jax.vmap
 import pickle
 import tensorflow_probability.substrates.jax as tfp
 tfpd = tfp.distributions
+from quadax import quadgk, quadcc
 
 _TWO_OVER_PI = 2.0 / jnp.pi
 _SQRT_TWO_OVER_PI = jnp.sqrt(2.0 / jnp.pi)
@@ -74,6 +76,110 @@ def newton_solver(callable_1, callable_2, guess_tuple, a, b, A_target, B_target,
     init_state = (guess_tuple, jnp.linalg.norm(F(guess_tuple)), 0)
     v_final, _, _ = jax.lax.while_loop(cond, one_step, init_state)
     return v_final
+
+
+def logskewnormal_system_residuals(mean, sigma, shape, measured_mean, M, deltaM_low, deltaM_high, quantile=0.32):
+    """
+    Residual vector for the system:
+      1) measured_mean = E[X]
+      2) quantile = P(M-deltaM_low < X <= M)
+      3) quantile = P(M < X <= M+deltaM_high)
+    where X follows a log-skew-normal law parameterized by (mean, sigma, shape)
+    in log-space.
+    """
+    if M <= 0.0:
+        raise ValueError("M must be strictly positive.")
+    if M - deltaM_low <= 0.0:
+        raise ValueError("M - deltaM_low must be strictly positive.")
+    if deltaM_high <= 0.0:
+        raise ValueError("deltaM_high must be strictly positive.")
+    if sigma <= 0.0:
+        raise ValueError("sigma must be strictly positive.")
+
+    mean_model = logskewnormal_mean(mean=mean, sigma=sigma, shape=shape)[0]
+    logM = jnp.log(M)
+    logM_low = jnp.log(M - deltaM_low)
+    logM_high = jnp.log(M + deltaM_high)
+
+    lower_mass = skewnormal_cdf(logM, mean=mean, sigma=sigma, shape=shape) - \
+                 skewnormal_cdf(logM_low, mean=mean, sigma=sigma, shape=shape)
+    upper_mass = skewnormal_cdf(logM_high, mean=mean, sigma=sigma, shape=shape) - \
+                 skewnormal_cdf(logM, mean=mean, sigma=sigma, shape=shape)
+
+    return jnp.array([
+        mean_model - measured_mean,
+        lower_mass - quantile,
+        upper_mass - quantile,
+    ])
+
+
+def solve_logskewnormal_from_mean_and_bounds(measured_mean, M, deltaM_low, deltaM_high, quantile=0.32,
+                                             initial_guess=None, max_iter=80, tol=1e-10,
+                                             fd_eps=1e-6, damping=0.0):
+    """
+    Solve for (mean, sigma, shape) of a log-skew-normal distribution from:
+      - measured mean of X,
+      - probability mass in [M-deltaM_low, M],
+      - probability mass in [M, M+deltaM_high].
+
+    Uses a damped Newton method with finite-difference Jacobian in the unconstrained
+    variables (mean, log_sigma, shape) to enforce sigma > 0.
+    """
+    if initial_guess is None:
+        initial_guess = jnp.array([jnp.log(M), 0.5, 0.0], dtype=jnp.float64)
+
+    if float(initial_guess[1]) <= 0.0:
+        raise ValueError("initial_guess[1] (sigma) must be strictly positive.")
+
+    theta0 = np.array([
+        float(initial_guess[0]),
+        np.log(float(initial_guess[1])),
+        float(initial_guess[2]),
+    ], dtype=float)
+
+    def residual_from_theta(theta_vec):
+        mean = float(theta_vec[0])
+        sigma = float(np.exp(theta_vec[1]))
+        shape = float(theta_vec[2])
+        residuals = logskewnormal_system_residuals(
+            mean=mean,
+            sigma=sigma,
+            shape=shape,
+            measured_mean=measured_mean,
+            M=M,
+            deltaM_low=deltaM_low,
+            deltaM_high=deltaM_high,
+            quantile=quantile,
+        )
+        residuals = np.asarray(residuals, dtype=float)
+        if np.all(np.isfinite(residuals)):
+            return residuals
+        return np.array([1e12, 1e12, 1e12], dtype=float)
+
+    result = sp_opt.least_squares(
+        fun=residual_from_theta,
+        x0=theta0,
+        bounds=([-np.inf, np.log(1e-12), -50.0], [np.inf, np.log(1e12), 50.0]),
+        method="trf",
+        diff_step=fd_eps,
+        ftol=tol,
+        xtol=tol,
+        gtol=tol,
+        max_nfev=max_iter,
+    )
+
+    mean_sol = float(result.x[0])
+    sigma_sol = float(np.exp(result.x[1]))
+    shape_sol = float(result.x[2])
+
+    info = {
+        "converged": bool(result.success),
+        "iterations": int(result.nfev),
+        "residual_norm": float(np.linalg.norm(result.fun)),
+        "residual_vector": result.fun,
+        "message": result.message,
+    }
+    return jnp.array([mean_sol, sigma_sol, shape_sol]), info
 
 def save_nested_sampler_results(results, output_path: str) -> None:
     output = Path(output_path)
@@ -148,3 +254,20 @@ def skewnormal_cdf(x, mean=0.0, sigma=1.0, shape=0.0, name=None):
     inv_scale = 1.0 / scale
     z = (x - loc) * inv_scale
     return jsp.stats.norm.cdf(z, loc=0.0, scale=1.0)-2*tfp.math.owens_t(z,shape, name=name)
+
+@jit
+def logskewnormal_pdf(x, mean=0.0, sigma=1.0, shape=0.0):
+    return jnp.exp(logskewnormal_logpdf(x, mean, sigma, shape))
+
+@jit
+def skewnormal_pdf(x, mean=0.0, sigma=1.0, shape=0.0):
+    return jnp.exp(skewnormal_logpdf(x, mean, sigma, shape))
+
+@jit
+def logskewnormal_mean(mean=0.0, sigma=1.0, shape=0.0, epsabs=sys.float_info.epsilon, epsrel=sys.float_info.epsilon):
+
+    def integrand(t):
+        return t * logskewnormal_pdf(t, mean=mean, sigma=sigma, shape=shape)
+
+    y, info = quadcc(integrand, [0.0, jnp.inf], epsabs=epsabs, epsrel=epsrel)
+    return (y, info)

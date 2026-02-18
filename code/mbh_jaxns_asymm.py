@@ -85,9 +85,9 @@ if __name__ == "__main__":
         return jnp.where(in_bounds, log_like, -jnp.inf)
     
     def prior_model_logskewnormal():
-        a = yield Prior(tfpd.Uniform(-35.0, 35.0), name="a")
-        b = yield Prior(tfpd.Uniform(-20.0, 40.0), name="b")
-        true_sigma_gc = yield Prior(tfpd.Sample(tfpd.Uniform(0.0, 1.0e+3), sample_shape=(N_bh,)), name="true_sigma_gc")
+        a = yield Prior(tfpd.Uniform(-35.0, 35.0), name=r"$\beta$")
+        b = yield Prior(tfpd.Uniform(-20.0, 40.0), name=r"$\alpha$")
+        true_sigma_gc = yield Prior(tfpd.Sample(tfpd.Uniform(0.0, 1.0e+3), sample_shape=(N_bh,)), name=r"$\sigma_{gc,true}$")
         return a, b, true_sigma_gc
     
     model = Model(prior_model_logskewnormal, log_likelihood_logskewnormal)
