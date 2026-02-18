@@ -17,6 +17,11 @@ import pickle
 import tensorflow_probability.substrates.jax as tfp
 tfpd = tfp.distributions
 
+_TWO_OVER_PI = 2.0 / jnp.pi
+_SQRT_TWO_OVER_PI = jnp.sqrt(2.0 / jnp.pi)
+_LOG_2PI = jnp.log(2.0 * jnp.pi)
+_LOG_2 = jnp.log(2.0)
+
 def function_pair(callable_1, callable_2, x, y, a, b, A_target, B_target):
     """
     Function to cast the problem of finding solutions to the non linear system
@@ -80,17 +85,66 @@ def save_nested_sampler_results(results, output_path: str) -> None:
 def load_nested_sampler_results(input_path: str):
     with Path(input_path).open("rb") as f:
         return pickle.load(f)
-    
-def skewnorm_cdf(x, mean=0.0, scale=1.0, shape=0.0, name=None):
-    z = (x - mean) / scale + shape * jnp.sqrt(2 / jnp.pi) / jnp.sqrt(1 + shape**2)
+
+@jit
+def normal_logpdf(x, mean=0.0, sigma=1.0):
+    inv_sigma = 1.0 / sigma
+    return -jnp.log(sigma) - 0.5*(((x - mean)*inv_sigma)**2+jnp.log(2.0*jnp.pi))
+
+@jit
+def skewnormal_logpdf(x, mean=0.0, sigma=1.0, shape=0.0):
+    shape_squared = shape * shape
+    delta = shape / jnp.sqrt(1.0 + shape_squared)
+    scale = sigma / jnp.sqrt(1.0 - _TWO_OVER_PI * delta * delta)
+    loc = mean - scale * delta * _SQRT_TWO_OVER_PI
+    inv_scale = 1.0 / scale
+    z = (x - loc) * inv_scale
+    normal_log_term = -jnp.log(scale) - 0.5*(z*z + _LOG_2PI)
+    return normal_log_term + jnp.log(jsp.stats.norm.cdf(shape * z)) + _LOG_2
+
+@jit
+def lognormal_logpdf(x, mean=0.0, sigma=1.0):
+    inv_sigma = 1.0 / sigma
+    logx = jnp.log(x)
+    return -jnp.log(sigma) - 0.5*(((logx - mean)*inv_sigma)**2+_LOG_2PI) - logx
+
+@jit
+def logskewnormal_logpdf(x, mean=0.0, sigma=1.0, shape=0.0):
+    shape2 = shape * shape
+    inv_sqrt_1p_shape2 = jax.lax.rsqrt(1.0 + shape2)
+    delta = shape * inv_sqrt_1p_shape2
+    delta2 = delta * delta
+
+    inv_scale_norm = jax.lax.rsqrt(1.0 - _TWO_OVER_PI * delta2)
+    scale = sigma * inv_scale_norm
+    loc = mean - scale * delta * _SQRT_TWO_OVER_PI
+
+    x_safe = jnp.maximum(x, jnp.finfo(jnp.asarray(x).dtype).tiny)
+    inv_scale = 1.0 / scale
+    logx = jnp.log(x_safe)
+    z = (logx - loc) * inv_scale
+    normal_log_term = -jnp.log(scale) - 0.5*(z*z + _LOG_2PI)
+    out = normal_log_term - logx + _LOG_2 + jsp.special.log_ndtr(shape * z)
+    return jnp.where(x > 0.0, out, -jnp.inf)
+
+@jit
+def logskewnormal_logpdf_faster(x, mean=0.0, sigma=1.0, shape=0.0):
+    shape_squared = shape * shape
+    delta = shape / jnp.sqrt(1.0 + shape_squared)
+    scale = sigma / jnp.sqrt(1.0 - _TWO_OVER_PI * delta * delta)
+    loc = mean - scale * delta * _SQRT_TWO_OVER_PI
+    inv_scale = 1.0 / scale
+    logx = jnp.log(x)
+    z = (logx - loc) * inv_scale
+    normal_log_term = -jnp.log(scale) - 0.5*(z*z + _LOG_2PI)
+    return normal_log_term + jnp.log(jsp.stats.norm.cdf(shape * z)) + _LOG_2 - logx
+
+@jit
+def skewnormal_cdf(x, mean=0.0, sigma=1.0, shape=0.0, name=None):
+    shape_squared = shape * shape
+    delta = shape / jnp.sqrt(1.0 + shape_squared)
+    scale = sigma / jnp.sqrt(1.0 - _TWO_OVER_PI * delta * delta)
+    loc = mean - scale * delta * _SQRT_TWO_OVER_PI
+    inv_scale = 1.0 / scale
+    z = (x - loc) * inv_scale
     return jsp.stats.norm.cdf(z, loc=0.0, scale=1.0)-2*tfp.math.owens_t(z,shape, name=name)
-
-def logskewnorm_logpdf(x, loc=0.0, scale=1.0, shape=0.0):
-    z = (jnp.log(x) - loc) / scale + shape * jnp.sqrt(2 / jnp.pi) / jnp.sqrt(1 + shape**2)
-    return tfpd.Normal(loc - scale*shape * jnp.sqrt(2 / jnp.pi) / jnp.sqrt(1 + shape**2), scale).log_prob(jnp.log(x)) -jnp.log(x) + jnp.log(2.0) + jnp.log(jsp.stats.norm.cdf(shape * z))
-
-def skewnorm_logpdf(x, mean=0.0, sigma=1.0, shape=0.0):
-    loc = mean
-    scale = sigma/np.sqrt(1 - 2*(shape**2)/(np.pi*(1+shape**2)))
-    z = (x - loc) / scale + shape * jnp.sqrt(2 / jnp.pi) / jnp.sqrt(1 + shape**2)
-    return tfpd.Normal(loc - scale*shape * jnp.sqrt(2 / jnp.pi) / jnp.sqrt(1 + shape**2), scale).log_prob(x) -jnp.log(scale) + jnp.log(2.0) + jnp.log(jsp.stats.norm.cdf(shape * z))
