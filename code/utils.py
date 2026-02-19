@@ -258,9 +258,20 @@ def skewnormal_pdf(x, mean=0.0, sigma=1.0, shape=0.0):
 
 @jit
 def logskewnormal_mean(mean=0.0, sigma=1.0, shape=0.0, epsabs=sys.float_info.epsilon, epsrel=sys.float_info.epsilon):
+    shape2 = shape * shape
+    delta = shape / jnp.sqrt(1.0 + shape2)
+    scale = sigma / jnp.sqrt(1.0 - _TWO_OVER_PI * delta * delta)
+    loc = mean - scale * delta * _SQRT_TWO_OVER_PI
+    y = 2.0 * jnp.exp(loc + 0.5 * scale * scale) * jsp.stats.norm.cdf(delta * scale)
+    info = jnp.array(0, dtype=jnp.int32)
+    return (y, info)
+
+@jit
+def logskewnormal_mean_numerical(mean=0.0, sigma=1.0, shape=0.0, epsabs=sys.float_info.epsilon, epsrel=sys.float_info.epsilon):
 
     def integrand(t):
         return t * logskewnormal_pdf(t, mean=mean, sigma=sigma, shape=shape)
 
     y, info = quadcc(integrand, [0.0, jnp.inf], epsabs=epsabs, epsrel=epsrel)
     return (y, info)
+
