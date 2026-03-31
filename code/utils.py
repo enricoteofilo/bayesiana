@@ -146,8 +146,6 @@ def solve_logskewnormal_from_mean_and_bounds(measured_mean, M, deltaM_low, delta
     }
     return jnp.array([mean_sol, sigma_sol, shape_sol]), info
 
-
-
 def import_bh_data(fname: str) -> dict:
     """
     Function to import the $M_{BH}$, $\sigma_{GC}$ and corresponding 
@@ -183,7 +181,6 @@ def save_nested_sampler_results(results, output_path: str) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("wb") as f:
         pickle.dump(results, f, protocol=pickle.HIGHEST_PROTOCOL)
-
 
 def load_nested_sampler_results(input_path: str):
     with Path(input_path).open("rb") as f:
