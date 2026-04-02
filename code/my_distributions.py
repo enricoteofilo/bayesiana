@@ -25,39 +25,33 @@ _LOG_2PI = jnp.log(2.0 * jnp.pi)
 _LOG_2 = jnp.log(2.0)
 DEBUG = False
 
-@jit
-def normal_logpdf(x, mean=0.0, sigma=1.0):
+def normal_logpdf(x, mean=0.0, sigma=1.0, name=None):
     inv_sigma = 1.0 / sigma
     return -jnp.log(sigma) - 0.5*(((x - mean)*inv_sigma)**2+jnp.log(2.0*jnp.pi))
 
-@jit
-def skewnormal_logpdf(x, loc=0.0, scale=1.0, shape=0.0):
+def skewnormal_logpdf(x, loc=0.0, scale=1.0, shape=0.0, name=None):
     """Logarithm of the probability density function of the skew normal distribution."""
     inv_scale = 1.0 / scale
     t = (x - loc) * inv_scale
     normal_log_term = -jnp.log(scale) - 0.5*(t*t + _LOG_2PI)
     return normal_log_term + jsp.special.log_ndtr(shape * t) + _LOG_2
 
-@jit
 def skewnormal_cdf(x, loc=0.0, scale=1.0, shape=0.0, name=None):
     """Cumulative distribution function of the SkewNormal distribution."""
     inv_scale = 1.0 / scale
     t =(x - loc) * inv_scale
-    return jsp.stats.norm.cdf(t, loc=0.0, scale=1.0) -2*tfp.math.owens_t(t,shape, name=name)
+    return jsp.stats.norm.cdf(t, loc=0.0, scale=1.0) -2*tfp.math.owens_t(t,shape)
 
-@jit
-def lognormal_logpdf(x, loc=0.0, scale=1.0):
+def lognormal_logpdf(x, loc=0.0, scale=1.0, name=None):
     inv_scale = 1.0 / scale
     logx = jnp.log(x)
-    z = (logx - loc) * inv_scale
-    return -logx + -jnp.log(scale) - 0.5*(z*z + _LOG_2PI)
+    t = (logx - loc) * inv_scale
+    return -logx + -jnp.log(scale) - 0.5*(t*t + _LOG_2PI)
 
-@jit
 def logskewnormal_logpdf(x, loc=0.0, scale=1.0, shape=0.0, name=None):
     logx = jnp.log(x)
     return skewnormal_logpdf(logx, loc, scale, shape, name=name) - logx
 
-@jit
 def logskewnormal_cdf(x, loc=0.0, scale=1.0, shape=0.0, name=None):
     return skewnormal_cdf(jnp.log(x), loc, scale, shape, name=name)
 
