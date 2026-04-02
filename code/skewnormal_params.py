@@ -92,16 +92,19 @@ if __name__ == "__main__":
     sigma_gc_log_left_edge = jnp.log(bh_data["sigma_gc"]-bh_data["sigma_gc_low"])
     sigma_gc_log_right_edge = jnp.log(bh_data["sigma_gc"]+bh_data["sigma_gc_high"])
 
-    params, residuals, minimized_squares = batch_solver(M_log_mode, M_log_left_edge, M_log_right_edge)
-    print(f"Estimated parameters: {params}")
-    print(f"Residuals: {residuals}")
-    print(f"Residuals sum square root normalized: {jnp.sqrt(minimized_squares/3)/MACHINE_EPSILON}")
+    M_params, M_residuals, M_minimized_squares = batch_solver(M_log_mode, M_log_left_edge, M_log_right_edge)
+    print(f"Estimated parameters: {M_params}")
+    print(f"Residuals: {M_residuals}")
+    print(f"Residuals sum square root normalized: {jnp.sqrt(M_minimized_squares/3)/MACHINE_EPSILON}")
 
     sigma_gc_params, sigma_gc_residuals, sigma_gc_minimized_squares = batch_solver(sigma_gc_log_mode, sigma_gc_log_left_edge, sigma_gc_log_right_edge)
     print(f"Estimated parameters for sigma_gc: {sigma_gc_params}")
     print(f"Residuals for sigma_gc: {sigma_gc_residuals}")
     print(f"Residuals sum square root normalized for sigma_gc: {jnp.sqrt(sigma_gc_minimized_squares/3)/MACHINE_EPSILON}")      
 
+    np.savetxt("./results/logskewnormal_params_M.txt", M_params)
+    np.savetxt("./results/logskewnormal_params_sigma_gc.txt", sigma_gc_params)
+    exit()
 
 
 
