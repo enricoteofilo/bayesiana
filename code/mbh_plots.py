@@ -1,3 +1,11 @@
+"""
+--- PLOTTING SCRIPT ---
+This file is intended to be used for creating the final plots avoiding 
+the need to re-run the entire data processing and inference steps.
+
+Author: Francesco Enrico Teofilo
+
+"""
 import os
 from pathlib import Path
 import pickle
