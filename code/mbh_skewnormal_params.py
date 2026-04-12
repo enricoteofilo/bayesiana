@@ -97,13 +97,36 @@ if __name__ == "__main__":
     print(f"Residuals: {M_residuals}")
     print(f"Residuals sum square root normalized: {jnp.sqrt(M_minimized_squares/3)/MACHINE_EPSILON}")
 
+
     sigma_gc_params, sigma_gc_residuals, sigma_gc_minimized_squares = batch_solver(sigma_gc_log_mode, sigma_gc_log_left_edge, sigma_gc_log_right_edge)
     print(f"Estimated parameters for sigma_gc: {sigma_gc_params}")
     print(f"Residuals for sigma_gc: {sigma_gc_residuals}")
-    print(f"Residuals sum square root normalized for sigma_gc: {jnp.sqrt(sigma_gc_minimized_squares/3)/MACHINE_EPSILON}")      
+    print(f"Residuals sum square root normalized for sigma_gc: {jnp.sqrt(sigma_gc_minimized_squares/3)/MACHINE_EPSILON}")
+
+    whatever_residuals = jnp.concatenate([M_residuals, sigma_gc_residuals], axis=0)
+    print(f"Minimum residual value: {jnp.min(jnp.abs(whatever_residuals))}")
+    print(f"Maximum residual value: {jnp.max(jnp.abs(whatever_residuals))}")
+    print(f"Mean residual value: {jnp.mean(jnp.abs(whatever_residuals))}")
+    print(f"Median residual value: {jnp.median(jnp.abs(whatever_residuals))}")
 
     np.savetxt("./results/logskewnormal_params_M.txt", M_params)
     np.savetxt("./results/logskewnormal_params_sigma_gc.txt", sigma_gc_params)
+
+    from jax import jacfwd, vmap, jit
+
+    def compute_condition_number(params, args):
+        # jacfwd is highly efficient for small, square Jacobians (3x3)
+        jacobian_fn = jacfwd(logskewnormal_nonlin_system_mode_quantiles, argnums=0)
+        J = jacobian_fn(params, args)
+        
+        # jnp.linalg.cond directly computes the condition number via SVD
+        kappa = jnp.linalg.cond(J)
+        return kappa
+
+    # Vectorize the diagnostic tool to run over the entire dataset
+    batch_diagnostic = jit(vmap(compute_condition_number, in_axes=(0, 0)))
+    print(batch_diagnostic(M_params, (M_log_mode, M_log_left_edge, M_log_right_edge)))
+    print(batch_diagnostic(sigma_gc_params, (sigma_gc_log_mode, sigma_gc_log_left_edge, sigma_gc_log_right_edge)))  
     exit()
 
 
