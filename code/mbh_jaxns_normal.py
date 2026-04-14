@@ -56,16 +56,23 @@ if __name__ == "__main__":
         ) - N_bh * jnp.log(M_max)
         return jnp.where(in_bounds, log_like, -jnp.inf)
     
-    def prior_model_normal():
-        a = yield Prior(tfpd.Uniform(-35.0, 35.0), name="a")
-        b = yield Prior(tfpd.Uniform(-20.0, 40.0), name="b")
-        true_sigma_gc = yield Prior(tfpd.Sample(tfpd.Uniform(0.0, 1.0e+3), sample_shape=(N_bh,)), name="true_sigma_gc")
+    amin = -20
+    amax = 20
+    bmin = -20
+    bmax = 20
+    sigma_gc_min_log = 1.0 #-15.0
+    sigma_gc_max_log = 3.0 #jnp.log10(2.99792458e5)
+    
+    def prior_model_uniform():
+        a = yield Prior(tfpd.Uniform(amin, amax), name="a")
+        b = yield Prior(tfpd.Uniform(bmin, bmax), name="b")
+        true_sigma_gc = yield Prior(tfpd.Sample(tfpd.Uniform(10**sigma_gc_min_log, 10**sigma_gc_max_log), sample_shape=(N_bh,)), name=r"\sigma_{gc}^{true}")
         return a, b, true_sigma_gc
     
-    model = Model(prior_model_normal, log_likelihood_normal)
+    model = Model(prior_model_uniform, log_likelihood_normal)
     model.sanity_check(random.PRNGKey(0), S=10)
 
-    ns = NestedSampler(model, s=1000, k=model.U_ndims, num_live_points=model.U_ndims*10000)
+    ns = NestedSampler(model, s=1000, k=model.U_ndims, num_live_points=model.U_ndims*1000)
     termination_reason, state = jax.jit(ns)(random.PRNGKey(2))
     results = ns.to_results(termination_reason, state=state)
     save_nested_sampler_results(results, "results/gaussian_ns_results.pkl")
