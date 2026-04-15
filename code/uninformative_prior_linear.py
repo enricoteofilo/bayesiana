@@ -158,7 +158,7 @@ def prob_b_given_a(a, b, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
     normalization = integral_unnorm_prob_b_given_a(bmax, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)
     return jnp.where(valid_bounds, jnp.where(in_bounds & (normalization>0.0), jnp.exp(n_obs*jnp.log(length))/normalization, 0.0), jnp.nan)
 
-def conditional_cdf_b_given_a(b, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
+def conditional_cdf_b_given_a(a, b, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
     valid_bounds = (xmin <= xmax) & (ymin <= ymax) & (bmin <= bmax) & (n_obs >= 0)
     normalization = integral_unnorm_prob_b_given_a(bmax, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)
     cumulative_unnorm = integral_unnorm_prob_b_given_a(b, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)
