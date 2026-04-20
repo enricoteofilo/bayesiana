@@ -10,6 +10,7 @@ import jax.numpy as jnp
 from quadax import quadcc, quadgk, quadts, romberg
 import numpy as np
 from scipy.integrate import quad
+import optimistix as optx
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_platform_name", "cpu")
@@ -76,7 +77,7 @@ def unnorm_prob_b_given_a(b, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
     prior for the linear model y=ax+b:
 
     .. math::
-        p(b|a) \propto \mathbb{I}(b;b_{min},b_{max})L(a,b;x_{min},x_{max},y_{min},y_{max})^N
+        p(b|a) \propto f(b;a)=\mathbb{I}(b;b_{min},b_{max})L(a,b;x_{min},x_{max},y_{min},y_{max})^N
         
         
     """
@@ -88,40 +89,196 @@ def unnorm_prob_b_given_a(b, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
     in_bounds = (b_low_bound <= b) & (b <= b_high_bound) & (x_low_bound < x_high_bound) & (xmin <= x_low_bound) & (x_high_bound <= xmax)
     return jnp.where(valid_bounds, jnp.where(in_bounds, jnp.exp(n_obs*jnp.log(length)), 0.0), jnp.nan)
 
-@partial(jax.jit, static_argnames=['n_obs', 'n_grid'])
-def build_unnorm_cdf_bb_lut(a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs, n_grid=2000):
-    r"""
-    Helper function. Builds a lookup table for the cumulative integral of the 
-    unnormalized PDF from :func:`unnorm_prob_b_given_a`, evaluating it on a grid 
-    internally.
+
+@partial(jax.jit, static_argnames=['n_obs'])
+def cdf_b_given_a_helper(b, a, xmin, xmax, ymin, ymax, n_obs):
+    """
+    Evaluates the analytical results of the integral:
 
     .. math::
         F(b;a) = \int_{b_{min}}^{b} db^{\prime}\,\mathbb{I}(b^{\prime};b_{min},b_{max})L(a,b^{\prime};x_{min},x_{max},y_{min},y_{max})^N
+
+    .. math::
+        L_{flat} = \begin{cases}
+        x_{max} - x_{min} & \text{if } (y_{max} - a x_{max}) \geq (y_{min} - a x_{min}) \\
+        \frac{y_{max} - y_{min}}{|a|} & \text{otherwise}
+        \end{cases}
     
-    Evaluates the unnormalized PDF on the grid ``linspace(bmin, bmax, n_grid)``,
-    clips to non-negative, and accumulates the probability density with the trapezoidal 
-    rule so that the resulting function is non-decreasing by construction.
-
-    Returns
-    -------
-    b_grid : 1-D array of shape ``(n_grid,)``, the grid used to build the look-up table
-    cdf    : 1-D array of shape ``(n_grid,)``, values in [0, 1]
+        
     """
-    b_grid = jnp.linspace(bmin, bmax, n_grid)
-    pdf_vals = jnp.clip(unnorm_prob_b_given_a(b_grid, a, bmin, bmax, xmin, xmax,
-                                     ymin, ymax, n_obs), 0.0, jnp.inf)
+    ax_max = jnp.maximum(a*xmin, a*xmax)
+    ax_min = jnp.minimum(a*xmin, a*xmax)
+    b1 = ymin - ax_max
+    b2 = jnp.minimum(ymin - ax_min, ymax - ax_max)
+    b3 = jnp.maximum(ymin - ax_min, ymax - ax_max)
+    b4 = ymax - ax_min
+    Lflat = jnp.where((ymax -ax_max) >= (ymin - ax_min), xmax - xmin, (ymax-ymin)/jnp.abs(a))
+    result = jnp.where( a == 0.0, jnp.where(b<b1, 0.0, jnp.where((b2<=b) & (b<=b3), (b-b2)*jnp.exp(n_obs*jnp.log(Lflat)), (b3-b2)*jnp.exp(n_obs*jnp.log(Lflat)))), 
+                       jnp.where(b<=b1, 0.0, 
+                                 jnp.where(b<=b2, jnp.exp((n_obs+1)*jnp.log(b-b1)-n_obs*jnp.log(jnp.abs(a))-jnp.log(n_obs+1)),
+                                           jnp.where(b<=b3,
+                                                     jnp.exp((n_obs+1)*jnp.log(b2-b1)-n_obs*jnp.log(jnp.abs(a))-jnp.log(n_obs+1))+
+                                                     (b-b2)*jnp.exp(n_obs*jnp.log(Lflat)),
+                                                     jnp.where(b<b4,
+                                                               jnp.exp((n_obs+1)*jnp.log(b2-b1)-n_obs*jnp.log(jnp.abs(a))-jnp.log(n_obs+1))+
+                                                                (b3-b2)*jnp.exp(n_obs*jnp.log(Lflat))+
+                                                                jnp.exp((n_obs+1)*jnp.log(b4-b3)-n_obs*jnp.log(jnp.abs(a))-jnp.log(n_obs+1))-
+                                                                jnp.exp((n_obs+1)*jnp.log(b4-b)-n_obs*jnp.log(jnp.abs(a))-jnp.log(n_obs+1)),
+                                                                jnp.exp((n_obs+1)*jnp.log(b2-b1)-n_obs*jnp.log(jnp.abs(a))-jnp.log(n_obs+1))+
+                                                                (b3-b2)*jnp.exp(n_obs*jnp.log(Lflat))+
+                                                                jnp.exp((n_obs+1)*jnp.log(b4-b3)-n_obs*jnp.log(jnp.abs(a))-jnp.log(n_obs+1))
+                                                               )
+                                                     )
+                                           )
+                                 )
+                       ) 
+    return jnp.clip(result, 0.0, +jnp.inf)
 
-    db = jnp.diff(b_grid)
-    avg_pdf = 0.5 * (pdf_vals[:-1] + pdf_vals[1:])
-    increments = avg_pdf * db                       # non-negative
-    cumulative = jnp.concatenate([jnp.zeros(1), jnp.cumsum(increments)])
 
-    normalization = cumulative[-1]
-    cdf = jnp.where(normalization > 0.0, cumulative, 0.0)
-    cdf = jnp.clip(cdf, 0.0, +jnp.inf)
-    return b_grid, cdf
+@partial(jax.jit, static_argnames=['n_obs'])
+def prob_b_given_a(b, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
+    r"""
+    The conditional prior for b given a, under the uninformative joint 
+    prior for the linear model y=ax+b:
+
+    .. math::
+        p(b|a) = \frac{\mathbb{I}(b;b_{min},b_{max})L(a,b;x_{min},x_{max},y_{min},y_{max})^N}{F(b_{high bound};a)-F(b_{low bound};a)}
+        
+        
+    """
+    valid_bounds = (xmin <= xmax) & (ymin <= ymax) & (bmin <= bmax) & (n_obs >= 0)
+    x_low_bound, x_high_bound = x_bounds_scalars(a,b,xmin,xmax,ymin,ymax)
+    b_low_bound = jnp.maximum(bmin, ymin - jnp.maximum(a*xmin, a*xmax))
+    b_high_bound = jnp.minimum(bmax, ymax - jnp.minimum(a*xmin, a*xmax))
+    ax_max = jnp.maximum(a*xmin, a*xmax)
+    ax_min = jnp.minimum(a*xmin, a*xmax)
+    b1 = ymin - ax_max
+    b2 = jnp.minimum(ymin - ax_min, ymax - ax_max)
+    b3 = jnp.maximum(ymin - ax_min, ymax - ax_max)
+    b4 = ymax - ax_min
+    Lflat = jnp.where((ymax -ax_max) >= (ymin - ax_min), xmax - xmin, (ymax-ymin)/jnp.abs(a))
+    prob = jnp.where( a == 0.0, jnp.where((b2<=b) & (b<=b3), jnp.exp(n_obs*jnp.log(Lflat)), 0.0), 
+                       jnp.where(b<=b1, 0.0, 
+                                 jnp.where(b<=b2, jnp.exp(n_obs*jnp.log(b-b1)-n_obs*jnp.log(jnp.abs(a))),
+                                           jnp.where(b<=b3,
+                                                     jnp.exp(n_obs*jnp.log(Lflat)),
+                                                     jnp.where(b<b4,
+                                                                jnp.exp(n_obs*jnp.log(b4-b)-n_obs*jnp.log(jnp.abs(a))),
+                                                                0.0
+                                                               )
+                                                     )
+                                           )
+                                 )
+                       ) 
+    in_bounds = (b_low_bound <= b) & (b <= b_high_bound) & (x_low_bound < x_high_bound) & (xmin <= x_low_bound) & (x_high_bound <= xmax)
+    denominator = (cdf_b_given_a_helper(b_high_bound, a, xmin, xmax, ymin, ymax, n_obs)-
+                  cdf_b_given_a_helper(b_low_bound, a, xmin, xmax, ymin, ymax, n_obs))
+    return jnp.where(valid_bounds, jnp.where(in_bounds & (denominator>0.0), prob/denominator, 0.0), jnp.nan)
 
 
+@partial(jax.jit, static_argnames=['n_obs'])
+def cdf_b_given_a(b, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
+    """
+    Returns the normalized conditional cumulative density function for b given a,
+    under the uninformative joint prior for the linear model y=ax+b:
+
+    .. math::
+        CDF(b|a) = \frac{F(b;a)-F(b_{low bound};a)}{F(b_{high bound};a)-F(b_{low bound};a)}
+
+    .. math::
+        L_{flat} = \begin{cases}
+        x_{max} - x_{min} & \text{if } (y_{max} - a x_{max}) \geq (y_{min} - a x_{min}) \\
+        \frac{y_{max} - y_{min}}{|a|} & \text{otherwise}
+        \end{cases}
+    
+        
+    """
+    b_low_bound = jnp.maximum(bmin, ymin - jnp.maximum(a*xmin, a*xmax))
+    b_high_bound = jnp.minimum(bmax, ymax - jnp.minimum(a*xmin, a*xmax))
+    numerator = (cdf_b_given_a_helper(b, a, xmin, xmax, ymin, ymax, n_obs)-
+                  cdf_b_given_a_helper(b_low_bound, a, xmin, xmax, ymin, ymax, n_obs))    
+    denominator = (cdf_b_given_a_helper(b_high_bound, a, xmin, xmax, ymin, ymax, n_obs)-
+                  cdf_b_given_a_helper(b_low_bound, a, xmin, xmax, ymin, ymax, n_obs))
+    cdf = jnp.where(denominator > 0.0,
+                    jnp.where(b<=bmin, 0.0,
+                              jnp.where(b<bmax, numerator/denominator,
+                                        1.0)),
+                    jnp.nan)
+    return jnp.clip(cdf, 0.0, 1.0)
+
+@partial(jax.jit)
+def inversion_cdf_b_given_a_residual(b, args):
+    F_target, a, xmin, xmax, ymin, ymax, n_obs = args
+    return cdf_b_given_a_helper(b, a, xmin, xmax, ymin, ymax, n_obs) - F_target
+
+@partial(jax.jit, static_argnames=['n_obs'])
+def inverse_cdf_b_given_a(ub, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
+    r"""Quantile function :math:`b=CDF^{-1}(u|a)`.
+
+    Maps :math:`u \sim \mathrm{Uniform}(0,1)` to *b* such that
+    :math:`\mathrm{CDF}(b\mid a) = u`.
+
+    Parameters
+    ----------
+    u      : scalar or array — quantile(s) in [0, 1]
+    """
+    valid_bounds = (xmin <= xmax) & (ymin <= ymax) & (bmin <= bmax) & (n_obs >= 0)
+    b_low_bound = jnp.maximum(bmin, ymin - jnp.maximum(a*xmin, a*xmax))
+    b_high_bound = jnp.minimum(bmax, ymax - jnp.minimum(a*xmin, a*xmax))
+    safe_epsilon = 0.35*jnp.finfo(jnp.float64).eps
+    ub_clipped = jnp.clip(ub, 0.0 + safe_epsilon, 1.0 - safe_epsilon)
+    F_low = cdf_b_given_a_helper(b_low_bound, a, xmin, xmax, ymin, ymax, n_obs)
+    F_high = cdf_b_given_a_helper(b_high_bound, a, xmin, xmax, ymin, ymax, n_obs)
+    F_target = jnp.clip(F_low + ub_clipped * (F_high - F_low), 0.0, +jnp.inf)
+    b_result = jnp.where((ub >= 0.0) & (ub < safe_epsilon), b_low_bound,
+                         jnp.where((ub > 1.0 - safe_epsilon) & (ub <= 1.0), b_high_bound,
+                                   jnp.where((0.0 < ub) & (ub < 1.0),
+                                   optx.root_find(inversion_cdf_b_given_a_residual,
+                                                    optx.Bisection(rtol=os.sys.float_info.epsilon,
+                                                                    atol=os.sys.float_info.epsilon
+                                                                    ),
+                                                    y0=0.5*(b_high_bound+b_low_bound),
+                                                    args=(F_target, a, xmin, xmax, ymin, ymax, n_obs),
+                                                    options={"lower": b_low_bound-safe_epsilon, "upper": b_high_bound+safe_epsilon}, #dictionary with bounds
+                                                    max_steps=512,
+                                                    throw=False                                           
+                                                ).value,
+                                                jnp.nan
+                                            )
+                                    )
+                        )
+    b_result = jnp.clip(b_result, b_low_bound, b_high_bound)
+    return jnp.where(valid_bounds, b_result, jnp.nan)
+
+## PROBABILITY p(a)
+@partial(jax.jit, static_argnames=['n_obs'])
+def unnorm_prob_a(a, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
+    r"""
+    The unnormalized marginalized prior for `a`, under the uninformative joint 
+    prior for the linear model y=ax+b:
+
+    .. math::
+        \pi(a) \propto f(a)=\mathbb{I}(a;a_{min},a_{max})(1+a^2)^{\frac{N-3}{2}}(F(b_{high bound};a)-F(b_{low bound};a))
+        
+        
+    """
+    valid_bounds = (xmin <= xmax) & (ymin <= ymax) & (bmin <= bmax) & (amin<= amax) & (n_obs >= 0)
+    b_low_bound = jnp.maximum(bmin, ymin - jnp.maximum(a*xmin, a*xmax))
+    b_high_bound = jnp.minimum(bmax, ymax - jnp.minimum(a*xmin, a*xmax))
+    in_bounds = (amin <= a) & (a <= amax) & (b_low_bound <= b_high_bound) & (((a<0) & (a*xmin>=ymin-bmax) & (a*xmax<=ymax-bmin) & (amin<=a) & (a<=amax)) |
+          ((a==0) & (amin<=a) & (a<=amax)) | 
+          ((a>0) & (a*xmin<=ymax-bmin) & (a*xmax>=ymin-bmax) & (amin<=a) & (a<=amax)))
+    output = jnp.where(valid_bounds, jnp.clip(jnp.where(in_bounds,
+                                            jnp.exp(0.5*(n_obs-3)*jnp.log(1+a**2)+jnp.log(
+                                                cdf_b_given_a_helper(b_high_bound, a, xmin, xmax, ymin, ymax, n_obs)-
+                                                cdf_b_given_a_helper(b_low_bound, a, xmin, xmax, ymin, ymax, n_obs)
+                                                )),
+                                            0.0),0.0,+jnp.inf),
+                    jnp.nan)
+    return output
+
+
+## p(b|a) JAXED WITH LUTS
 @partial(jax.jit, static_argnames=['n_obs', 'n_grid'])
 def build_cdf_b_given_a_lut(a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs, n_grid=2000):
     r"""
@@ -156,7 +313,7 @@ def build_cdf_b_given_a_lut(a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs, n_grid
 
 
 @partial(jax.jit, static_argnames=['n_obs', 'n_grid'])
-def cdf_b_given_a(b, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs, n_grid=2000):
+def cdf_b_given_a_lut(b, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs, n_grid=2000):
     r"""
     Returns the CDF(b|a) evaluated at arbitrary **b** values for fixed **a**.
 
@@ -184,7 +341,7 @@ def cdf_b_given_a(b, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs, n_grid=2000):
     return jnp.where(valid_bounds, result, jnp.nan)
 
 @partial(jax.jit, static_argnames=['n_obs', 'n_grid'])
-def quantile_b_given_a(u, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs, n_grid=2000):
+def quantile_b_given_a_lut(u, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs, n_grid=2000):
     r"""Quantile function :math:`b=CDF^{-1}(u|a)`.
 
     Maps :math:`u \sim \mathrm{Uniform}(0,1)` to *b* such that
@@ -267,28 +424,30 @@ def cdf_b_given_a_scipy(b, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
 ## MAIN JUST FOR TESTING
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
-    xmin = -10.0
-    xmax = jnp.log10(3.0e5)+5
-    ymin = 0.0
-    ymax = 18.0+5
-    amin = -100.0
-    amax = 100.0
-    bmin = -35.0
-    bmax = 35.0
+    xmin = -15.0
+    xmax = jnp.log10(3.0e5)+1
+    ymin = -1.0
+    ymax = 25.0
+    amin = -jnp.inf
+    amax = jnp.inf
+    bmin = -1000
+    bmax = 1000
     Nobs = 10
 
     plt.figure('prob_x')
+    plt.title('p(x|a,b) for different values of a')
     print("Plotting p(x|a,b) for different values of a...")
     x = jnp.linspace(xmin-5.0, xmax+5.0, 1000)
     a = jnp.logspace(-1.5,1.0,10)
     b = 2.0
     for a_temp in a:
         prob_x_ab = prob_x_given_ab(x,a_temp,b,xmin,xmax,ymin,ymax)
-        print(f"a={a_temp:.2f}, prob_x_ab={prob_x_ab}")
+        #print(f"a={a_temp:.2f}, prob_x_ab={prob_x_ab}")
         plt.plot(x, prob_x_ab, label=f'a={a_temp:.2f}')
     plt.legend(loc='best')
 
     plt.figure('prob_b_unnorm')
+    plt.title('unnormalized p(b|a) for different values of a')
     print("Plotting p(b|a) for different values of a...")
     a = jnp.logspace(-1.5,1.0,10)
     b = jnp.linspace(bmin, bmax, 2500)
@@ -299,18 +458,20 @@ if __name__ == "__main__":
 
     plt.figure('prob_b')
     print("Plotting p(b|a) for different values of a...")
+    plt.title('p(b|a) for different values of a')
     a = jnp.linspace(1.25,3.75,10)
     a = a[((a<0) & (a*xmin>=ymin-bmax) & (a*xmax<=ymax-bmin) & (amin<=a) & (a<=amax)) |
           ((a==0) & (amin<=a) & (a<=amax)) | 
           ((a>0) & (a*xmin<=ymax-bmin) & (a*xmax>=ymin-bmax) & (amin<=a) & (a<=amax))]
     b = jnp.linspace(bmin, bmax, 2500)
     for a_temp in a:
-        y = prob_b_given_a(a_temp, b, bmin, bmax, xmin, xmax, ymin, ymax, Nobs)
+        y = prob_b_given_a(b, a_temp, bmin, bmax, xmin, xmax, ymin, ymax, Nobs)
         plt.plot(b, y, label=f'a={a_temp:.2f}')
     plt.legend(loc='best')
 
     plt.figure('conditional_cdf_b')
     print("Plotting CDF(b|a) for different values of a...")
+    plt.title('CDF(b|a) for different values of a')
     a = jnp.linspace(1.25,3.75,10)
     a = a[((a<0) & (a*xmin>=ymin-bmax) & (a*xmax<=ymax-bmin) & (amin<=a) & (a<=amax)) |
           ((a==0) & (amin<=a) & (a<=amax)) | 
@@ -318,51 +479,37 @@ if __name__ == "__main__":
     b = jnp.linspace(bmin, bmax, 10000)
     for a_temp in a:
         y1 = cdf_b_given_a(b, a_temp, bmin, bmax, xmin, xmax, ymin, ymax, Nobs)
-        #y2 = cdf_b_given_a_scipy(b, a_temp, bmin, bmax, xmin, xmax, ymin, ymax, Nobs)
+        y2 = cdf_b_given_a_lut(b, a_temp, bmin, bmax, xmin, xmax, ymin, ymax, Nobs)
         #y3 = cdf_b_given_a_monotone(b, a_temp, bmin, bmax, xmin, xmax, ymin, ymax, Nobs)
-        plt.plot(b, y1, label=f'a={a_temp:.2f} (LUT)')
-        #plt.plot(b, y2, label=f'a={a_temp:.2f} (scipy)', linestyle='dashed')
+        plt.plot(b, y1, label=f'a={a_temp:.2f} (exact)')
+        plt.plot(b, y2, label=f'a={a_temp:.2f} (LUT)', linestyle='dashed')
         #plt.plot(b, y3, label=f'a={a_temp:.2f} (monotone)', linestyle='dotted')
     plt.legend(loc='best')
 
-    plt.figure('expected_quantile_function')
+    plt.figure('expected_quantile_function_b')
     print("Plotting CDF^{-1}(b|u,a) for different values of a...")
     a = jnp.linspace(1.25,3.75,10)
     a = a[((a<0) & (a*xmin>=ymin-bmax) & (a*xmax<=ymax-bmin) & (amin<=a) & (a<=amax)) |
           ((a==0) & (amin<=a) & (a<=amax)) | 
           ((a>0) & (a*xmin<=ymax-bmin) & (a*xmax>=ymin-bmax) & (amin<=a) & (a<=amax))]
     b = jnp.linspace(bmin, bmax, 10000)
+    #ub = jnp.linspace(0.0, 1.0, 10000)
+    ub = 0.5+0.5*jnp.sort(jnp.concatenate([-jax.nn.sigmoid(jnp.logspace(-16.0, 16.0, 5000)), jax.nn.sigmoid(jnp.logspace(-16.0, 16.0, 5000))])) # to avoid numerical issues at the edges
+    # --- Plotting loop ---
     for a_temp in a:
         y1 = cdf_b_given_a(b, a_temp, bmin, bmax, xmin, xmax, ymin, ymax, Nobs)
-        plt.plot(y1, b, label=f'a={a_temp:.2f}')
+        y2 = jax.vmap(inverse_cdf_b_given_a, in_axes=(0, None, None, None, None, None, None, None, None))(
+    ub, a_temp, bmin, bmax, xmin, xmax, ymin, ymax, Nobs)
+        plt.plot(y1, b, label=f'a={a_temp:.2f} (expected)')
+        plt.plot(ub, y2, label=f'a={a_temp:.2f} (root find)', linestyle='dashed')
     plt.legend(loc='best')
 
-    plt.show()
-    exit()
-
-    # --- round-trip test: quantile(cdf(b)) ≈ b ---
-    print("Round-trip test: quantile(cdf(b)) ≈ b ...")
-    a_test = 2.5
-    b_test = jnp.linspace(bmin, bmax, 500)
-    u_test = cdf_b_given_a(b_test, a_test, bmin, bmax, xmin, xmax, ymin, ymax, Nobs)
-    b_roundtrip = quantile_b_given_a(u_test, a_test, bmin, bmax, xmin, xmax, ymin, ymax, Nobs)
-    # Only check within the support (where 0 < CDF < 1)
-    mask = (u_test > 1e-6) & (u_test < 1.0 - 1e-6)
-    max_err = jnp.max(jnp.abs(b_roundtrip[mask] - b_test[mask]))
-    print(f"  max |quantile(cdf(b)) - b| inside support = {max_err:.2e}")
-
-    plt.figure('quantile_b')
-    print("Plotting quantile(u|a) for different values of a...")
-    a = jnp.linspace(1.25,3.75,10)
-    a = a[((a<0) & (a*xmin>=ymin-bmax) & (a*xmax<=ymax-bmin) & (amin<=a) & (a<=amax)) |
-          ((a==0) & (amin<=a) & (a<=amax)) | 
-          ((a>0) & (a*xmin<=ymax-bmin) & (a*xmax>=ymin-bmax) & (amin<=a) & (a<=amax))]
-    u = jnp.linspace(0.0, 1.0, 500)
-    for a_temp in a:
-        b_out = quantile_b_given_a(u, a_temp, bmin, bmax, xmin, xmax, ymin, ymax, Nobs)
-        plt.plot(u, b_out, label=f'a={a_temp:.2f}')
-    plt.xlabel('u')
-    plt.ylabel('b = quantile(u|a)')
+    plt.figure('unnorm_prob_a')
+    print("Plotting f(a) with respect to a...")
+    a = jnp.linspace(-10,10,2000)
+    y = unnorm_prob_a(a, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, Nobs)
+# --- Plotting loop ---
+    plt.plot(a, y, label='f(a)')
     plt.legend(loc='best')
 
     plt.show()
