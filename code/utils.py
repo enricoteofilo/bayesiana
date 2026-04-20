@@ -144,3 +144,60 @@ def logskewnormal_mean_numerical(mean=0.0, sigma=1.0, shape=0.0, epsabs=sys.floa
     y, info = quadcc(integrand, [0.0, jnp.inf], epsabs=epsabs, epsrel=epsrel)
     return (y, info)
 
+def kbn_cumsum(increments):
+    """
+    Kahan-Babuška-Neumaier summation algorithm for improved numerical stability 
+    when summing a sequence of floating-point numbers.
+
+    See https://en.wikipedia.org/wiki/Kahan_summation_algorithm
+    
+    """
+    # Indexing the input array
+    n = len(increments)
+    # Prepare the accumulator
+    summation = np.zeros(n, dtype=np.float64)
+    temp_sum = 0.0
+    # Running compensation for lost low-order bits
+    # is zero the first time
+    comp = 0.0
+    for i in range(1,n):
+        t = temp_sum + increments[i]
+        if np.abs(temp_sum) >= np.abs(increments[i]):
+            # If former `sum` is bigger, low-order digits of `input[i]` 
+            # are lost and can be evaluated by
+            comp += (temp_sum - t) + increments[i]
+        else:
+            # Else the low-order digits lost are from `sum`
+            comp += (increments[i] - t) + temp_sum
+        temp_sum = t
+        summation[i] = temp_sum + comp
+    return summation
+    
+@jit
+def kbn_cumsum_jax(increments):
+    """
+    Kahan-Babuška-Neumaier summation algorithm for improved numerical stability 
+    when summing a sequence of floating-point numbers.
+    Uses `jax.lax.scan` to allow for JIT compilation and automatic differentiation.
+
+
+    See https://en.wikipedia.org/wiki/Kahan_summation_algorithm
+
+    For non-JAX version, see :func:`kbn_cumsum`.
+    """
+    def iterative_block(carry, increment):
+        temp_sum, comp = carry
+        t = temp_sum + increment
+        comp += jnp.where(jnp.abs(temp_sum) >= jnp.abs(increment),
+                         (temp_sum - t) + increment,
+                         (increment - t) + temp_sum
+                         )
+        temp_sum = t
+        return (temp_sum, comp), temp_sum + comp
+    # Indexing the input array
+    init = (0.0, 0.0)
+    # Executing the iterative block sequentially over the increments
+    # array using `jax.lax.scan`
+    _, summation = jax.lax.scan(iterative_block, init, increments[1:])
+    return jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), summation])
+

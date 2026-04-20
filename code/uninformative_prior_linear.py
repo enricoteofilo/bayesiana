@@ -278,6 +278,8 @@ def unnorm_prob_a(a, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
     return output
 
 
+
+
 ## p(b|a) JAXED WITH LUTS
 @partial(jax.jit, static_argnames=['n_obs', 'n_grid'])
 def build_cdf_b_given_a_lut(a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs, n_grid=2000):
