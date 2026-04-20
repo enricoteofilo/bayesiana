@@ -225,7 +225,7 @@ def inverse_cdf_b_given_a(ub, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
     valid_bounds = (xmin <= xmax) & (ymin <= ymax) & (bmin <= bmax) & (n_obs >= 0)
     b_low_bound = jnp.maximum(bmin, ymin - jnp.maximum(a*xmin, a*xmax))
     b_high_bound = jnp.minimum(bmax, ymax - jnp.minimum(a*xmin, a*xmax))
-    safe_epsilon = 0.35*jnp.finfo(jnp.float64).eps
+    safe_epsilon = 0.5*jnp.finfo(jnp.float64).eps
     ub_clipped = jnp.clip(ub, 0.0 + safe_epsilon, 1.0 - safe_epsilon)
     F_low = cdf_b_given_a_helper(b_low_bound, a, xmin, xmax, ymin, ymax, n_obs)
     F_high = cdf_b_given_a_helper(b_high_bound, a, xmin, xmax, ymin, ymax, n_obs)
@@ -276,6 +276,103 @@ def unnorm_prob_a(a, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
                                             0.0),0.0,+jnp.inf),
                     jnp.nan)
     return output
+
+def normalization_prob_a(amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
+    r"""
+    Numerically evaluates the integral necessary to normalize the marginalized prior 
+    for `a`, under the uninformative joint prior for the linear model y=ax+b:
+
+    .. math::
+        Z = \int_{-\infty}^{\infty}da\mathbb{I}(a;a_{min},a_{max})(1+a^2)^{\frac{N-3}{2}}(F(b_{high bound};a)-F(b_{low bound};a))
+        
+    """
+    Z, _ = quad(unnorm_prob_a, amin, amax, args=(amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs), 
+                epsabs=os.sys.float_info.epsilon , epsrel=os.sys.float_info.epsilon)
+    return Z
+
+@partial(jax.jit, static_argnames=['normalization','amin','amax','bmin','bmax',
+                                   'xmin','xmax','ymin','ymax','n_obs'])
+def prob_a(a, normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
+    r"""
+    The marginalized prior for `a`, under the uninformative joint 
+    prior for the linear model y=ax+b:
+
+    .. math::
+        \pi(a)=\frac{\mathbb{I}(a;a_{min},a_{max})(1+a^2)^{\frac{N-3}{2}}(F(b_{high bound};a)-F(b_{low bound};a))}
+        {\int_{-\infty}^{\infty}da\mathbb{I}(a;a_{min},a_{max})(1+a^2)^{\frac{N-3}{2}}(F(b_{high bound};a)-F(b_{low bound};a))}
+        
+    """
+    return jnp.where(normalization > 0.0, unnorm_prob_a(a, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)/normalization, jnp.nan)
+
+# --- Finding the effective bounds for the support of :math:`CDF(a)` ---
+def find_effective_bounds_a():
+    return 0.0
+
+# --- Building the LUT for :math:`CDF(a)` with a non-uniform grid ---
+"""
+PSEUDOALGORITHM:
+Pass 1: Coarse uniform grid (n = 1000–2000) over [a_eff_min, a_eff_max]
+        → trapezoidal cumulative sum → rough CDF → rough quantile
+
+Pass 2: Place n_final points CDF-equispaced using the rough quantile:
+          u_grid = linspace(0, 1, n_final)
+          a_grid = rough_quantile(u_grid)
+        → evaluate unnorm_prob_a on a_grid
+        → trapezoidal cumulative sum → refined CDF + store PDF values
+
+Pass 3 (optional): Repeat pass 2 using the refined quantile
+        → even better grid placement
+
+Termination: compare CDF from pass k vs pass k-1 at test points,
+             or check max |CDF_k(a) - CDF_{k-1}(a)| < ε
+"""
+def build_cdf_a_lut_iterative():
+    return 0.0
+
+
+# --- Hermite interpolation ---
+def hermite_interp_cdf_a(a, a_grid, cdf_table, pdf_table):
+    """
+    Cubic Hermite spline interpolation for :math:`CDF(a)`
+
+    See https://en.wikipedia.org/wiki/Cubic_Hermite_spline
+    
+    
+    """
+
+    return 0.0
+
+
+# --- Evaluate the quantile function Q(ua)=a starting from the CDF(a) LUT ---
+@partial(jax.jit, static_argnames=['normalization', 'amin', 'amax', 'bmin', 'bmax', 'xmin', 
+                                   'xmax', 'ymin', 'ymax', 'n_obs', 'newton_steps'])
+def quantile_a(ua, a_grid, cdf_table, pdf_table, normalization, amin, amax, bmin, 
+               bmax, xmin, xmax, ymin, ymax, n_obs, newton_steps=4):
+    """
+    Finds :math:`a=CDF(u_{a})` from the interpolation of an existing look-up table 
+    for :math:`CDF(a)` and refining the initial guess.
+    
+    1. Linear interpolation of the existing LUT grid provides initial guess
+    2. Newton steps where the CDF value is estimated via Hermite interpolation of the
+        existing LUT, and the PDF value is estimated from the normalized probability function.
+
+    We exploit the knowledge of the first derivative of :math:`CDF(a)` marginal pdf 
+    to speed up Newton method computation.
+
+    """
+    # Start from the interpolation of the existing LUT for CDF(a)
+    a_init = jnp.interp(ua, cdf_table, a_grid) #interpolates using the CDF(a) as `x` and the `a` as `y`
+    # Refining the initial guess with a few steps of Newton's method
+    # We exploit the knowledge of the marginal pdf :math:`\pi(a)` to help speed up Newton
+    def newton_step(a, _):
+        cdf_value = hermite_interp_cdf_a(a, a_grid, cdf_table, pdf_table)
+        pdf_value = unnorm_prob_a(a, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)/normalization
+        safe_pdf_val = jnp.clip(pdf_value, jnp.finfo(jnp.float64).tiny, jnp.inf)
+
+
+    return 0.0
+
+
 
 
 
