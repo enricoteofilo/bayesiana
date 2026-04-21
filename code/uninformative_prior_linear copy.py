@@ -304,6 +304,9 @@ def prob_a(a, normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_o
     """
     return jnp.where(normalization > 0.0, unnorm_prob_a(a, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)/normalization, jnp.nan)
 
+# --- Finding the effective bounds for the support of :math:`CDF(a)` ---
+# def find_kinks_prob_a():
+
 # --- Building the LUT for :math:`CDF(a)` with a non-uniform grid ---
 """
 PSEUDOALGORITHM:
@@ -338,6 +341,13 @@ def prob_a_of_t(t, normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax
     a = t_to_a_map(t)
     return prob_a(a, normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)*0.5*jnp.pi*(1+a**2)
 
+
+
+
+
+
+
+
 # --- Hermite interpolation ---
 def hermite_interp_cdf_a(a, a_grid, cdf_table, pdf_table):
     """
@@ -347,16 +357,8 @@ def hermite_interp_cdf_a(a, a_grid, cdf_table, pdf_table):
     
     
     """
+
     return 0.0
-
-
-
-
-
-
-
-
-
 
 
 # --- Evaluate the quantile function Q(ua)=a starting from the CDF(a) LUT ---
