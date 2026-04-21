@@ -1,6 +1,7 @@
 import os
 import math
 from functools import partial
+import warnings
 # Keep computations in FP64 and on CPU for reproducibility.
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_PLATFORM_NAME", "cpu")
@@ -350,13 +351,400 @@ def hermite_interp_cdf_a(a, a_grid, cdf_table, pdf_table):
     return 0.0
 
 
+# ── Multi-pass coarse CDF(a) LUT construction ────────────────────────────────
+# Private helpers (all operate in t-space via a = tan(π/2·t), t ∈ (−1, 1)).
+# We evaluate the unnormalized t-space PDF directly from `unnorm_prob_a` plus
+# the change-of-variable Jacobian, avoiding any function whose `static_argnames`
+# would conflict with array-valued `a` tracers.
+def _eval_unnorm_pdf_t(t_grid, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
+    r"""Evaluate the **unnormalized** t-space PDF
+
+    .. math::
+        \tilde{f}(t) = f(a(t))\cdot\tfrac{\pi}{2}(1+a^2)
+
+    on a numpy array *t_grid*, where :math:`f = \mathrm{unnorm\_prob\_a}` and
+    :math:`|da/dt| = \tfrac{\pi}{2}(1+a^2)`.
+
+    Returns a numpy float64 array; NaN and negative values are replaced by 0.
+    """
+    t_jax    = jnp.asarray(t_grid, dtype=jnp.float64)
+    a_jax    = t_to_a_map(t_jax)
+    jacobian = 0.5 * jnp.pi * (1.0 + a_jax ** 2)
+    unnorm_f = unnorm_prob_a(a_jax, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)
+    pdf_t    = np.array(unnorm_f * jacobian, dtype=np.float64)
+    np.nan_to_num(pdf_t, nan=0.0, copy=False)
+    return np.clip(pdf_t, 0.0, np.inf)
 
 
+def _trapz_cdf_from_pdf(t_grid, pdf_t):
+    r"""Build a normalized, non-decreasing CDF via the trapezoidal rule.
+
+    Parameters
+    ----------
+    t_grid : sorted numpy array — abscissae.
+    pdf_t  : numpy array — (unnormalized) PDF values at *t_grid* points.
+
+    Returns
+    -------
+    cdf_vals : numpy float64 array, shape ``(len(t_grid),)``, values in ``[0, 1]``.
+    """
+    dt         = np.diff(t_grid)
+    increments = np.clip(0.5 * (pdf_t[:-1] + pdf_t[1:]) * dt, 0.0, np.inf)
+    cumulative = np.concatenate([[0.0], np.cumsum(increments)])
+    total      = cumulative[-1]
+    cdf_vals   = cumulative / total if total > 0.0 else cumulative
+    return np.clip(cdf_vals, 0.0, 1.0)
 
 
+def _cdf_equispaced_grid(n, t_grid, cdf_vals, t_lo, t_hi):
+    r"""Place *n* grid points equispaced in :math:`u = \text{CDF}(t)` space.
+
+    For each :math:`u_j = j/(n-1)` finds :math:`t_j = Q(u_j)` via linear
+    interpolation of the *(cdf_vals, t_grid)* table.
+
+    Returns a sorted numpy array of *n* t-values clipped to ``[t_lo, t_hi]``.
+    """
+    u_uniform = np.linspace(0.0, 1.0, n)
+    t_new     = np.interp(u_uniform, cdf_vals, t_grid)
+    return np.clip(np.sort(t_new), t_lo, t_hi)
 
 
+def _amr_refine_cdf_lut(t_grid, pdf_t, amin, amax, bmin, bmax, xmin, xmax,
+                         ymin, ymax, n_obs, tol=1e-13, max_points=100_000):
+    r"""Adaptive mesh refinement (AMR) on a trapezoidal CDF table.
 
+    For each interval :math:`[t_i, t_{i+1}]` the local trapezoidal error is
+    estimated via the Simpson–trapz Richardson comparison:
+
+    .. math::
+        \varepsilon_i
+        = \tfrac{2h_i}{3}
+          \bigl|\tilde{f}(t_M) - \tfrac{\tilde{f}_i+\tilde{f}_{i+1}}{2}\bigr|,
+        \quad t_M = \tfrac{t_i+t_{i+1}}{2},\; h_i = t_{i+1}-t_i.
+
+    Intervals with :math:`\varepsilon_i > \mathrm{tol}` are bisected (midpoint
+    inserted).  The sweep repeats until all intervals satisfy the tolerance or
+    the grid size would exceed *max_points*.
+
+    Parameters
+    ----------
+    t_grid, pdf_t : sorted numpy arrays — current grid and its unnormalized
+                    t-space PDF values (output of :func:`_eval_unnorm_pdf_t`).
+    tol           : absolute error tolerance per interval in unnormalized
+                    CDF-increment units (default ``1e-13``).
+    max_points    : hard cap on total grid points (default 100 000).
+
+    Returns
+    -------
+    t_grid_out : refined sorted numpy float64 array.
+    pdf_t_out  : unnormalized t-space PDF values at every point of *t_grid_out*.
+    """
+    t_arr = np.array(t_grid, dtype=np.float64)
+    p_arr = np.array(pdf_t,  dtype=np.float64)
+
+    while True:
+        if len(t_arr) >= max_points:
+            break
+
+        h     = np.diff(t_arr)
+        t_mid = 0.5 * (t_arr[:-1] + t_arr[1:])
+        p_mid = _eval_unnorm_pdf_t(t_mid, amin, amax, bmin, bmax,
+                                    xmin, xmax, ymin, ymax, n_obs)
+
+        # Richardson / Simpson-vs-trapz error estimate per interval
+        err   = (2.0 * h / 3.0) * np.abs(p_mid - 0.5 * (p_arr[:-1] + p_arr[1:]))
+        bad   = err > tol
+        n_bad = int(np.sum(bad))
+
+        if n_bad == 0:
+            break
+
+        # Cap insertions so we never exceed max_points
+        slots_left = max_points - len(t_arr)
+        if n_bad > slots_left:
+            worst      = np.argsort(err)[::-1][:slots_left]
+            mask       = np.zeros(len(err), dtype=bool)
+            mask[worst] = True
+            bad        = mask
+
+        t_arr = np.concatenate([t_arr, t_mid[bad]])
+        p_arr = np.concatenate([p_arr, p_mid[bad]])
+        idx   = np.argsort(t_arr, kind='stable')
+        t_arr = t_arr[idx]
+        p_arr = p_arr[idx]
+
+    return t_arr, p_arr
+
+
+def build_coarse_cdf_a_lut(normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs,
+                             n_pass1=2000, n_pass2=5000, n_pass3=15000,
+                             max_passes=6, conv_tol=jnp.finfo(np.float64).eps,
+                             amr_tol=jnp.finfo(np.float64).eps, amr_max_points=100_000, t_eps=1e-7):
+    r"""Build a high-accuracy coarse CDF(a) look-up table via a multi-pass
+    adaptive algorithm.
+
+    This table is used **offline** to seed Newton polish when constructing the
+    quintic-Hermite :math:`Q(u)` grid.
+
+    **Change of variable** — all grid work is performed in :math:`t`-space via
+
+    .. math::
+        a = \tan\!\bigl(\tfrac{\pi}{2}t\bigr),\quad t \in (-1,1),
+
+    so that infinite :math:`a`-support maps to a bounded interval.
+    The unnormalized t-space PDF is
+    :math:`\tilde{f}(t)=f(a(t))\cdot\tfrac{\pi}{2}(1+a^2)`.
+
+    **Algorithm**
+
+    *Pass 1* — coarse uniform grid of *n_pass1* t-points → trapezoidal CDF.
+
+    *Pass 2* — *n_pass2* points placed CDF-equispaced (concentrates near mode,
+    spreads in tails) → refined CDF.
+
+    *Passes 3 …* — *n_pass3* points CDF-equispaced, iterated until
+
+    .. math::
+        \max_i\bigl|\mathrm{CDF}_k(t_i)-\mathrm{CDF}_{k-1}(t_i)\bigr|
+        < \mathrm{conv\_tol}
+
+    or *max_passes* is exhausted.
+
+    *AMR step* — each interval whose Richardson error estimate exceeds *amr_tol*
+    is bisected (see :func:`_amr_refine_cdf_lut`) until all intervals satisfy
+    the tolerance or the grid reaches *amr_max_points*.
+
+    Parameters
+    ----------
+    normalization   : float — :math:`Z=\int f(a)\,da` from
+                      :func:`normalization_prob_a`.
+    amin, amax      : float — support bounds (may be ``±inf``).
+    bmin, bmax, xmin, xmax, ymin, ymax : float — problem bounds.
+    n_obs           : int — number of observations.
+    n_pass1         : int — grid size for Pass 1 (default 2 000).
+    n_pass2         : int — grid size for Pass 2 (default 5 000).
+    n_pass3         : int — grid size for Passes 3+ (default 15 000).
+    max_passes      : int — maximum total passes including Passes 1 and 2
+                      (default 6, so up to 4 additional equispaced passes).
+    conv_tol        : float — normalized CDF convergence tolerance
+                      (default ``1e-13``).
+    amr_tol         : float — per-interval error tolerance for AMR in
+                      unnormalized CDF-increment units (default ``1e-13``).
+    amr_max_points  : int — hard cap on total grid points after AMR
+                      (default 100 000).
+    t_eps           : float — margin from ±1 in t-space; the effective a-range
+                      is :math:`|a| \lesssim 2/(\pi\cdot t\_\mathrm{eps})`
+                      (default ``1e-7``, giving :math:`|a|\lesssim 6.4\times10^6`).
+
+    Returns
+    -------
+    a_grid    : numpy float64 array, shape ``(N,)``, sorted a-values of the nodes.
+    cdf_table : numpy float64 array, shape ``(N,)``, normalized CDF in ``[0,1]``.
+    pdf_table : numpy float64 array, shape ``(N,)``, normalized
+               :math:`\pi(a) = \mathrm{unnorm\_prob\_a}(a)/Z` values.
+    """
+    if normalization <= 0.0:
+        raise ValueError(f"normalization must be positive, got {normalization!r}")
+
+    # Effective t-space bounds — clip inward to finite amin/amax when provided
+    t_lo = -1.0 + t_eps
+    t_hi = +1.0 - t_eps
+    if np.isfinite(amin):
+        t_lo = max(t_lo, float(a_to_t_map(amin)))
+    if np.isfinite(amax):
+        t_hi = min(t_hi, float(a_to_t_map(amax)))
+
+    # ── Pass 1: coarse uniform grid ──────────────────────────────────────────
+    t_grid   = np.linspace(t_lo, t_hi, n_pass1)
+    pdf_t    = _eval_unnorm_pdf_t(t_grid, amin, amax, bmin, bmax,
+                                   xmin, xmax, ymin, ymax, n_obs)
+    cdf_vals = _trapz_cdf_from_pdf(t_grid, pdf_t)
+
+    # ── Pass 2: first CDF-equispaced refinement ───────────────────────────────
+    t_grid   = _cdf_equispaced_grid(n_pass2, t_grid, cdf_vals, t_lo, t_hi)
+    pdf_t    = _eval_unnorm_pdf_t(t_grid, amin, amax, bmin, bmax,
+                                   xmin, xmax, ymin, ymax, n_obs)
+    cdf_vals = _trapz_cdf_from_pdf(t_grid, pdf_t)
+
+    # ── Passes 3+: iterate until CDF converges ────────────────────────────────
+    for _ in range(max(0, max_passes - 2)):
+        t_new    = _cdf_equispaced_grid(n_pass3, t_grid, cdf_vals, t_lo, t_hi)
+        pdf_new  = _eval_unnorm_pdf_t(t_new, amin, amax, bmin, bmax,
+                                       xmin, xmax, ymin, ymax, n_obs)
+        cdf_new  = _trapz_cdf_from_pdf(t_new, pdf_new)
+        # Compare new CDF against old CDF interpolated onto the new t-points
+        cdf_old_at_new = np.interp(t_new, t_grid, cdf_vals)
+        discrepancy    = float(np.max(np.abs(cdf_new - cdf_old_at_new)))
+        t_grid, pdf_t, cdf_vals = t_new, pdf_new, cdf_new
+        if discrepancy < conv_tol:
+            break
+
+    # ── AMR step ──────────────────────────────────────────────────────────────
+    t_grid, pdf_t = _amr_refine_cdf_lut(
+        t_grid, pdf_t, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs,
+        tol=amr_tol, max_points=amr_max_points,
+    )
+    # Recompute final normalized CDF after all AMR insertions
+    cdf_vals = _trapz_cdf_from_pdf(t_grid, pdf_t)
+
+    # ── Convert to a-space ────────────────────────────────────────────────────
+    a_grid = np.array(
+        t_to_a_map(jnp.asarray(t_grid, dtype=jnp.float64)),
+        dtype=np.float64,
+    )
+
+    # π(a) = unnorm_prob_a(a) / Z, evaluated on the final a-grid
+    unnorm_pdf_a = np.array(
+        unnorm_prob_a(
+            jnp.asarray(a_grid, dtype=jnp.float64),
+            amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs,
+        ),
+        dtype=np.float64,
+    )
+    np.nan_to_num(unnorm_pdf_a, nan=0.0, copy=False)
+    pdf_table = np.clip(unnorm_pdf_a, 0.0, np.inf) / normalization
+
+    return a_grid, cdf_vals, pdf_table
+
+### MY IMPLEMENTATION
+@jax.jit
+def cdf_from_pdf_over_grid(t_grid, pdf_t):
+    r"""Build a normalized, non-decreasing CDF via the trapezoidal rule 
+    starting from a normalized `pdf`.
+
+    Parameters
+    ----------
+    t_grid : sorted array — abscissa.
+    pdf_t  : array — PDF values at *t_grid* points.
+
+    Returns
+    -------
+    cdf_values : array, shape ``(len(t_grid),)``, values in ``[0, 1]``.
+    """
+    dt = jnp.diff(t_grid)
+    trapezoid_area = jnp.clip(0.5 * (pdf_t[:-1] + pdf_t[1:]) * dt, 0.0, np.inf)
+    cumulative = jnp.concatenate([[0.0], jnp.cumsum(trapezoid_area)])
+    cdf_values = jnp.where(cumulative[-1] <= 0.0, jnp.nan, jnp.clip(jnp.where(cumulative[-1] != 1.0, cumulative / cumulative[-1], cumulative), 0.0, 1.0))
+    return cdf_values
+
+@partial(jax.jit, static_argnames=['n_grid'])
+def build_cdf_equispaced_t_grid(x_grid, cdf_vals, xmin, xmax, n_grid=2000):
+    r"""
+    Creates a grid of *n_grid* points equally spaced in :math:`u = CDF(x)` 
+    space. Each element of the array is :math:`u_j = j/(n-1)`
+
+    Then for each :math:`u_j = j/(n-1)` finds :math:`x_j = Q(u_j)` via linear
+    interpolation of the *(cdf_vals, t_grid)* table.
+
+    Returns a sorted array of *n_grid* x-values clipped to ``[xmin, xamx]`` 
+    and the corresponding uniform CDF values.
+    """
+    u_uniform = jnp.linspace(0.0, 1.0, n_grid)
+    x_new_grid = jnp.interp(u_uniform, cdf_vals, x_grid)
+    return jnp.clip(jnp.sort(x_new_grid), xmin, xmax), u_uniform
+
+
+def adaptive_mesh_refinement_cdf(t_grid, pdf_t_grid, normalization,
+                          amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs,
+                          tol=jnp.finfo(np.float64).eps, max_points=int(1e5)):
+    t_array = np.array(t_grid, dtype=np.float64)
+    pdf_t_array = np.array(pdf_t_grid, dtype=np.float64)
+
+    converged = False
+    n_points = len(t_array)
+    while (n_points <= max_points):
+        # Estimate the increment between 
+        dt = np.diff(t_array)
+        t_mid = 0.5 * (t_array[:-1] + t_array[1:])
+        # Evaluates the pdf at the midpoints of the existing grid
+        prob_mid = np.array(
+            prob_a_of_t(jnp.asarray(t_mid, dtype=jnp.float64),
+                        normalization, amin, amax, bmin, bmax,
+                        xmin, xmax, ymin, ymax, n_obs),
+            dtype=np.float64,
+        )
+        np.nan_to_num(prob_mid, nan=0.0, copy=False)
+        prob_mid = np.clip(prob_mid, 0.0, np.inf)
+        # Estimates the error via the Newton-Cotes formula 
+        # for estimating numerical integration error
+        newton_cotes_err = (2.0 * dt/3.0) * np.abs(prob_mid - 0.5 * (pdf_t_array[:-1] + pdf_t_array[1:]))
+        not_within_tol = newton_cotes_err > tol
+        n_bad = int(np.sum(not_within_tol))
+        # If all points are within the tolerance, stop the refinement
+        if n_bad == 0:
+            converged = True 
+            break
+        # Otherwise keeps on until the maximum allowed number of grid 
+        # points is reached
+        slots_left = max_points - n_points
+        # If the `slots_left` are not enough to refine the grid to guarantee 
+        # the required precision, the refinement prioritezes the points with 
+        # the hightest estimated error
+        if n_bad > slots_left:
+            # Sort from worst error to last (`-1` in the indices)
+            # `[:slots_left]` selects the first `slots_left` grid intervals 
+            # with worst estimated error
+            worst = np.argsort(newton_cotes_err)[::-1][:slots_left]
+            # Creates the mask for the intervals to refine
+            refine_mask = np.zeros(len(newton_cotes_err), dtype=bool)
+            refine_mask[worst] = True
+            not_within_tol = refine_mask
+        # Appends the new points of the refined grid to the end of the arrays
+        t_array = np.concatenate([t_array, t_mid[not_within_tol]])
+        pdf_t_array = np.concatenate([pdf_t_array, prob_mid[not_within_tol]])
+        # Sorts the arrays to mantain an ordered `t_grid` array
+        indices_sorted = np.argsort(t_array, kind='stable')
+        # Refined grid at the end of this pass. Either output of the AMR step 
+        # or input of the next pass if neither convergence criterion is met
+        t_array = t_array[indices_sorted]
+        pdf_t_array = pdf_t_array[indices_sorted]
+        n_points = len(t_array)
+
+        # Throw a warning if the loop is exited before the required precision 
+        # is reached
+        if not converged:
+            warnings.warn(
+                f"adaptive_mesh_refinement_cdf: reached max_points={max_points} before "
+                f"satisfying tol={tol:.3e}. The CDF grid may not meet the requested precision. "
+                f"Consider increasing max_points or relaxing tol.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+    return t_array, pdf_t_array                      
+
+def build_cdf_a_lut(normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs, n_coarse_grid=2000, tol=jnp.finfo(np.float64).eps, max_points=int(1e5)):
+    
+    # Add error handling here!
+    tmin = a_to_t_map(amin)
+    tmax = a_to_t_map(amax)
+
+    # PASS 1: coarse uniform grid
+    t_grid = jnp.linspace(tmin, tmax, n_coarse_grid)
+    pdf_t = prob_a_of_t(t_grid, normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)
+    cdf_table = cdf_from_pdf_over_grid(t_grid, pdf_t)
+
+    # PASS 2: CDF-equispaced grid
+    t_grid, _ = build_cdf_equispaced_t_grid(t_grid, cdf_table, tmin, tmax, n_grid=n_coarse_grid)
+    pdf_t = prob_a_of_t(t_grid, normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)
+    cdf_table = cdf_from_pdf_over_grid(t_grid, pdf_t)
+
+    # PASS 3: CDF-equispaced grid
+    t_grid, _ = build_cdf_equispaced_t_grid(t_grid, cdf_table, tmin, tmax, n_grid=2*n_coarse_grid)
+    pdf_t = prob_a_of_t(t_grid, normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)
+    cdf_table = cdf_from_pdf_over_grid(t_grid, pdf_t)
+
+    # PASS 4+: Adaptive Mesh Refinement (AMR)
+    t_grid, pdf_t = adaptive_mesh_refinement_cdf(t_grid, pdf_t, normalization,
+                          amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs,
+                          tol=tol, max_points=max_points)
+    t_grid = jnp.asarray(t_grid, dtype=jnp.float64)
+    pdf_t = jnp.asarray(pdf_t, dtype=jnp.float64)
+    #Recomputing the CDF over the refined grid
+    a_grid = t_to_a_map(t_grid)
+    cdf_table = cdf_from_pdf_over_grid(t_grid, pdf_t)
+    pdf_a = prob_a(a_grid, normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)
+    return a_grid, cdf_table, pdf_a
 
 
 # --- Evaluate the quantile function Q(ua)=a starting from the CDF(a) LUT ---
