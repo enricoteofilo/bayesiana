@@ -71,7 +71,7 @@ if __name__ == "__main__":
                                                     )
 
     @jit
-    def log_likelihood_logskewnormal(a, b, true_sigma_gc):
+    def log_likelihood_normal(a, b, true_sigma_gc):
         predicted_M = jnp.exp(linear_correlation(true_sigma_gc, a, b))
         log_like = jnp.sum(
             tfpd.Normal(predicted_M, M_equiv_err).log_prob(M)

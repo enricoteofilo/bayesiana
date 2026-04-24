@@ -12,6 +12,7 @@ from quadax import quadcc, quadgk, quadts, romberg
 import numpy as np
 from scipy.integrate import quad
 import optimistix as optx
+from jaxns.framework.special_priors import SpecialPrior
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_platform_name", "cpu")
@@ -278,23 +279,61 @@ def unnorm_prob_a(a, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
                     jnp.nan)
     return output
 
-def normalization_prob_a(amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
+def normalization_prob_a(amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs, 
+                         epsabs=os.sys.float_info.epsilon, epsrel=os.sys.float_info.epsilon, 
+                         limit=int(1e6)):
     r"""
     Numerically evaluates the integral necessary to normalize the marginalized prior 
     for `a`, under the uninformative joint prior for the linear model y=ax+b:
 
     .. math::
-        Z = \int_{-\infty}^{\infty}da\mathbb{I}(a;a_{min},a_{max})(1+a^2)^{\frac{N-3}{2}}(F(b_{high bound};a)-F(b_{low bound};a))
+        Z = \int_{-\infty}^{\infty}da\mathbb{I}(a;a_{min},a_{max})(1+a^2)^{\frac{N-3}{2}}
+        (F(b_{high bound};a)-F(b_{low bound};a))
+
+
+    To try and provide accurate numerical integration even when the bounds :math:`a_{min}` 
+    and :math:`a_{max}` on `a` are very large or infinite, the integration is performed 
+    after applying the transformation :math:`a = \tan\left(\frac{\pi}{2}t\right)`, 
+    which maps :math:`t \in (-1, 1)` to :math:`a \in (-\infty, +\infty)`.
+    The probability density function is changed according to:
+
+    .. math::
+        \pi_{a}(a)da = \pi_{a}(a(t))\left|\frac{da}{dt}\right|dt = \pi_{t}(t)dt
         
     """
-    Z, _ = quad(unnorm_prob_a, amin, amax, args=(amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs), 
-                epsabs=os.sys.float_info.epsilon , epsrel=os.sys.float_info.epsilon)
+    if ((amin != -np.inf) and (amax != +np.inf) and (np.abs(amin) > 0.01*np.finfo(np.float64).max) 
+        and (np.abs(amax) > 0.01*np.finfo(np.float64).max)):
+        # Direct integration in a-space fails when amin/amax are near ±float64_max
+        # because scipy.integrate.quad cannot handle ranges of order 1e307.
+        t_epsilon = 1.5*jnp.finfo(jnp.float64).eps
+        tmin = max(float(a_to_t_map(jnp.asarray(amin, dtype=jnp.float64))), -1.0 + t_epsilon)
+        tmax = min(float(a_to_t_map(jnp.asarray(amax, dtype=jnp.float64))), 1.0 - t_epsilon)
+
+        def integrand_t(t):
+            a = float(np.tan(0.5 * np.pi * t))
+            f_a = float(unnorm_prob_a(jnp.asarray(a, dtype=jnp.float64),
+                                    amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs))
+            jacobian = 0.5 * np.pi * (1.0 + a ** 2)
+            val = f_a * jacobian
+            return 0.0 if (not np.isfinite(val) or val < 0.0) else val
+        
+    else:
+        tmin = amin
+        tmax = amax
+        def integrand_t(t):
+            val = unnorm_prob_a(t, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)
+            return 0.0 if (not np.isfinite(val) or val < 0.0) else val
+        
+    # Insert a=0 as a known kink point if it lies in the domain
+    points = [0.0] if (np.isfinite(amin) and np.isfinite(amax) and tmin <= 0.0 <= tmax) else None
+
+    Z, _ = quad(integrand_t, tmin, tmax, epsabs=epsabs, epsrel=epsrel, limit=limit, points=points)
     return Z
 
-@partial(jax.jit, static_argnames=['normalization','amin','amax','bmin','bmax',
-                                   'xmin','xmax','ymin','ymax','n_obs'])
+@partial(jax.jit, static_argnames=['n_obs'])
 def prob_a(a, normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
     r"""
+
     The marginalized prior for `a`, under the uninformative joint 
     prior for the linear model y=ax+b:
 
@@ -303,7 +342,10 @@ def prob_a(a, normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_o
         {\int_{-\infty}^{\infty}da\mathbb{I}(a;a_{min},a_{max})(1+a^2)^{\frac{N-3}{2}}(F(b_{high bound};a)-F(b_{low bound};a))}
         
     """
-    return jnp.where(normalization > 0.0, unnorm_prob_a(a, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)/normalization, jnp.nan)
+    return jnp.where(normalization > 0.0, 
+                     unnorm_prob_a(a, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)/normalization, 
+                     jnp.nan
+                     )
 
 # --- Building the LUT for :math:`CDF(a)` with a non-uniform grid ---
 """
@@ -333,11 +375,17 @@ def a_to_t_map(a):
     inv_pi = 1.0 / jnp.pi
     return 2*inv_pi*jnp.arctan(a)
 
-@partial(jax.jit, static_argnames=['n_obs'])
-def prob_a_of_t(t, normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
+@partial(jax.jit, static_argnames=['n_obs', 'use_linear'])
+def prob_a_of_t(t, normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs, use_linear=True):
     t = jnp.clip(t, -1.0, +1.0)
-    a = t_to_a_map(t)
-    return prob_a(a, normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)*0.5*jnp.pi*(1+a**2)
+    if use_linear:
+        a = amin + 0.5 * (amax - amin) * (t + 1.0)
+        jacobian = 0.5 * (amax - amin)
+    else:
+        a = t_to_a_map(t)
+        # Guard against 0*inf=NaN at t=±1 where a=±inf but prob_a=0
+        jacobian = jnp.where(jnp.isfinite(a), 0.5 * jnp.pi * (1.0 + a ** 2), 0.0)
+    return prob_a(a, normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs) * jacobian
 
 # --- Hermite interpolation ---
 def hermite_interp_cdf_a(a, a_grid, cdf_table, pdf_table):
@@ -351,132 +399,8 @@ def hermite_interp_cdf_a(a, a_grid, cdf_table, pdf_table):
     return 0.0
 
 
-# ── Multi-pass coarse CDF(a) LUT construction ────────────────────────────────
-# Private helpers (all operate in t-space via a = tan(π/2·t), t ∈ (−1, 1)).
-# We evaluate the unnormalized t-space PDF directly from `unnorm_prob_a` plus
-# the change-of-variable Jacobian, avoiding any function whose `static_argnames`
-# would conflict with array-valued `a` tracers.
-def _eval_unnorm_pdf_t(t_grid, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
-    r"""Evaluate the **unnormalized** t-space PDF
-
-    .. math::
-        \tilde{f}(t) = f(a(t))\cdot\tfrac{\pi}{2}(1+a^2)
-
-    on a numpy array *t_grid*, where :math:`f = \mathrm{unnorm\_prob\_a}` and
-    :math:`|da/dt| = \tfrac{\pi}{2}(1+a^2)`.
-
-    Returns a numpy float64 array; NaN and negative values are replaced by 0.
-    """
-    t_jax    = jnp.asarray(t_grid, dtype=jnp.float64)
-    a_jax    = t_to_a_map(t_jax)
-    jacobian = 0.5 * jnp.pi * (1.0 + a_jax ** 2)
-    unnorm_f = unnorm_prob_a(a_jax, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)
-    pdf_t    = np.array(unnorm_f * jacobian, dtype=np.float64)
-    np.nan_to_num(pdf_t, nan=0.0, copy=False)
-    return np.clip(pdf_t, 0.0, np.inf)
-
-
-def _trapz_cdf_from_pdf(t_grid, pdf_t):
-    r"""Build a normalized, non-decreasing CDF via the trapezoidal rule.
-
-    Parameters
-    ----------
-    t_grid : sorted numpy array — abscissae.
-    pdf_t  : numpy array — (unnormalized) PDF values at *t_grid* points.
-
-    Returns
-    -------
-    cdf_vals : numpy float64 array, shape ``(len(t_grid),)``, values in ``[0, 1]``.
-    """
-    dt         = np.diff(t_grid)
-    increments = np.clip(0.5 * (pdf_t[:-1] + pdf_t[1:]) * dt, 0.0, np.inf)
-    cumulative = np.concatenate([[0.0], np.cumsum(increments)])
-    total      = cumulative[-1]
-    cdf_vals   = cumulative / total if total > 0.0 else cumulative
-    return np.clip(cdf_vals, 0.0, 1.0)
-
-
-def _cdf_equispaced_grid(n, t_grid, cdf_vals, t_lo, t_hi):
-    r"""Place *n* grid points equispaced in :math:`u = \text{CDF}(t)` space.
-
-    For each :math:`u_j = j/(n-1)` finds :math:`t_j = Q(u_j)` via linear
-    interpolation of the *(cdf_vals, t_grid)* table.
-
-    Returns a sorted numpy array of *n* t-values clipped to ``[t_lo, t_hi]``.
-    """
-    u_uniform = np.linspace(0.0, 1.0, n)
-    t_new     = np.interp(u_uniform, cdf_vals, t_grid)
-    return np.clip(np.sort(t_new), t_lo, t_hi)
-
-
-def _amr_refine_cdf_lut(t_grid, pdf_t, amin, amax, bmin, bmax, xmin, xmax,
-                         ymin, ymax, n_obs, tol=1e-13, max_points=100_000):
-    r"""Adaptive mesh refinement (AMR) on a trapezoidal CDF table.
-
-    For each interval :math:`[t_i, t_{i+1}]` the local trapezoidal error is
-    estimated via the Simpson–trapz Richardson comparison:
-
-    .. math::
-        \varepsilon_i
-        = \tfrac{2h_i}{3}
-          \bigl|\tilde{f}(t_M) - \tfrac{\tilde{f}_i+\tilde{f}_{i+1}}{2}\bigr|,
-        \quad t_M = \tfrac{t_i+t_{i+1}}{2},\; h_i = t_{i+1}-t_i.
-
-    Intervals with :math:`\varepsilon_i > \mathrm{tol}` are bisected (midpoint
-    inserted).  The sweep repeats until all intervals satisfy the tolerance or
-    the grid size would exceed *max_points*.
-
-    Parameters
-    ----------
-    t_grid, pdf_t : sorted numpy arrays — current grid and its unnormalized
-                    t-space PDF values (output of :func:`_eval_unnorm_pdf_t`).
-    tol           : absolute error tolerance per interval in unnormalized
-                    CDF-increment units (default ``1e-13``).
-    max_points    : hard cap on total grid points (default 100 000).
-
-    Returns
-    -------
-    t_grid_out : refined sorted numpy float64 array.
-    pdf_t_out  : unnormalized t-space PDF values at every point of *t_grid_out*.
-    """
-    t_arr = np.array(t_grid, dtype=np.float64)
-    p_arr = np.array(pdf_t,  dtype=np.float64)
-
-    while True:
-        if len(t_arr) >= max_points:
-            break
-
-        h     = np.diff(t_arr)
-        t_mid = 0.5 * (t_arr[:-1] + t_arr[1:])
-        p_mid = _eval_unnorm_pdf_t(t_mid, amin, amax, bmin, bmax,
-                                    xmin, xmax, ymin, ymax, n_obs)
-
-        # Richardson / Simpson-vs-trapz error estimate per interval
-        err   = (2.0 * h / 3.0) * np.abs(p_mid - 0.5 * (p_arr[:-1] + p_arr[1:]))
-        bad   = err > tol
-        n_bad = int(np.sum(bad))
-
-        if n_bad == 0:
-            break
-
-        # Cap insertions so we never exceed max_points
-        slots_left = max_points - len(t_arr)
-        if n_bad > slots_left:
-            worst      = np.argsort(err)[::-1][:slots_left]
-            mask       = np.zeros(len(err), dtype=bool)
-            mask[worst] = True
-            bad        = mask
-
-        t_arr = np.concatenate([t_arr, t_mid[bad]])
-        p_arr = np.concatenate([p_arr, p_mid[bad]])
-        idx   = np.argsort(t_arr, kind='stable')
-        t_arr = t_arr[idx]
-        p_arr = p_arr[idx]
-
-    return t_arr, p_arr
-
-
-def build_coarse_cdf_a_lut(normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs,
+'''
+def _build_coarse_cdf_a_lut(normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs,
                              n_pass1=2000, n_pass2=5000, n_pass3=15000,
                              max_passes=6, conv_tol=jnp.finfo(np.float64).eps,
                              amr_tol=jnp.finfo(np.float64).eps, amr_max_points=100_000, t_eps=1e-7):
@@ -605,6 +529,8 @@ def build_coarse_cdf_a_lut(normalization, amin, amax, bmin, bmax, xmin, xmax, ym
     pdf_table = np.clip(unnorm_pdf_a, 0.0, np.inf) / normalization
 
     return a_grid, cdf_vals, pdf_table
+'''
+
 
 ### MY IMPLEMENTATION
 @jax.jit
@@ -623,8 +549,14 @@ def cdf_from_pdf_over_grid(t_grid, pdf_t):
     """
     dt = jnp.diff(t_grid)
     trapezoid_area = jnp.clip(0.5 * (pdf_t[:-1] + pdf_t[1:]) * dt, 0.0, np.inf)
-    cumulative = jnp.concatenate([[0.0], jnp.cumsum(trapezoid_area)])
-    cdf_values = jnp.where(cumulative[-1] <= 0.0, jnp.nan, jnp.clip(jnp.where(cumulative[-1] != 1.0, cumulative / cumulative[-1], cumulative), 0.0, 1.0))
+    cumulative = jnp.concatenate([jnp.array([0.0]), jnp.cumsum(trapezoid_area)])
+    cdf_values = jnp.where(cumulative[-1] <= 0.0, jnp.nan, 
+                           jnp.clip(jnp.where(cumulative[-1] != 1.0, cumulative / cumulative[-1], 
+                                              cumulative
+                                              ), 
+                                    0.0, 1.0
+                                    )
+                            )
     return cdf_values
 
 @partial(jax.jit, static_argnames=['n_grid'])
@@ -643,10 +575,29 @@ def build_cdf_equispaced_t_grid(x_grid, cdf_vals, xmin, xmax, n_grid=2000):
     x_new_grid = jnp.interp(u_uniform, cdf_vals, x_grid)
     return jnp.clip(jnp.sort(x_new_grid), xmin, xmax), u_uniform
 
+def inject_zero_anchor_point(t_grid, pdf_t_grid, t0_anchor, normalization, amin, 
+                             amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs, 
+                             use_linear=True
+                             ):
+    p0 = np.array(prob_a_of_t(jnp.asarray(t0_anchor, dtype=np.float64), normalization, 
+                              amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs, 
+                                use_linear=use_linear),
+                        dtype=np.float64)
+    np.nan_to_num(p0, nan=0.0, copy=False)
+    p0 = np.clip(p0, 0.0, np.inf)
+    t_grid = np.concatenate([t_grid, np.array([t0_anchor], dtype=np.float64)])
+    pdf_t_grid = np.concatenate([pdf_t_grid, np.array([p0], dtype=np.float64)])
+    indices_sorted = np.argsort(t_grid, kind='stable')
+    t_grid = t_grid[indices_sorted]
+    pdf_t_grid = pdf_t_grid[indices_sorted]
+    return t_grid, pdf_t_grid
+
 
 def adaptive_mesh_refinement_cdf(t_grid, pdf_t_grid, normalization,
                           amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs,
-                          tol=jnp.finfo(np.float64).eps, max_points=int(1e5)):
+                          tol=jnp.finfo(np.float64).eps, max_points=int(1e5),
+                          use_linear = True
+                          ):
     t_array = np.array(t_grid, dtype=np.float64)
     pdf_t_array = np.array(pdf_t_grid, dtype=np.float64)
 
@@ -658,11 +609,13 @@ def adaptive_mesh_refinement_cdf(t_grid, pdf_t_grid, normalization,
         t_mid = 0.5 * (t_array[:-1] + t_array[1:])
         # Evaluates the pdf at the midpoints of the existing grid
         prob_mid = np.array(
-            prob_a_of_t(jnp.asarray(t_mid, dtype=jnp.float64),
-                        normalization, amin, amax, bmin, bmax,
-                        xmin, xmax, ymin, ymax, n_obs),
-            dtype=np.float64,
-        )
+                        prob_a_of_t(jnp.asarray(t_mid, dtype=jnp.float64),
+                                    normalization, amin, amax, bmin, bmax,
+                                    xmin, xmax, ymin, ymax, n_obs, 
+                                    use_linear=use_linear
+                                    ),
+                        dtype=np.float64,
+                    )
         np.nan_to_num(prob_mid, nan=0.0, copy=False)
         prob_mid = np.clip(prob_mid, 0.0, np.inf)
         # Estimates the error via the Newton-Cotes formula 
@@ -713,42 +666,99 @@ def adaptive_mesh_refinement_cdf(t_grid, pdf_t_grid, normalization,
 
     return t_array, pdf_t_array                      
 
-def build_cdf_a_lut(normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs, n_coarse_grid=2000, tol=jnp.finfo(np.float64).eps, max_points=int(1e5)):
-    
-    # Add error handling here!
-    tmin = a_to_t_map(amin)
-    tmax = a_to_t_map(amax)
+def build_cdf_a_lut(normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs, 
+                    n_coarse_grid=2000, tol=jnp.finfo(np.float64).eps, max_points=int(1e5),
+                    use_linear = True
+                    ):
+    if use_linear:
+        tmin = -1.0
+        tmax = 1.0
+    else:
+        # Clamp tmin/tmax away from ±1: for very large finite bounds (e.g. ±0.45·fmax)
+        # a_to_t_map rounds to exactly ±1.0 in float64, causing t_to_a_map→±inf and
+        # 0*inf=NaN in the PDF.  t_eps=1e-7 keeps |a| ≲ 2/(π·1e-7) ≈ 6.4e6.
+        t_epsilon = 1.5*jnp.finfo(jnp.float64).eps
+        tmin = float(np.clip(float(a_to_t_map(jnp.asarray(amin, dtype=jnp.float64))),
+                            -1.0 + t_epsilon, 1.0 - t_epsilon))
+        tmax = float(np.clip(float(a_to_t_map(jnp.asarray(amax, dtype=jnp.float64))),
+                            -1.0 + t_epsilon, 1.0 - t_epsilon))
+    if amin <= 0.0 <= amax:
+        t0_anchor = 0.0 if not use_linear else (-(amin + amax) / (amax - amin))
+    else:
+        t0_anchor = None
 
     # PASS 1: coarse uniform grid
-    t_grid = jnp.linspace(tmin, tmax, n_coarse_grid)
-    pdf_t = prob_a_of_t(t_grid, normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)
+    t_grid = np.linspace(tmin, tmax, n_coarse_grid)
+    pdf_t = prob_a_of_t(t_grid, normalization, amin, amax, bmin, bmax, xmin, xmax, 
+                        ymin, ymax, n_obs, use_linear=use_linear
+                        )
     cdf_table = cdf_from_pdf_over_grid(t_grid, pdf_t)
 
     # PASS 2: CDF-equispaced grid
     t_grid, _ = build_cdf_equispaced_t_grid(t_grid, cdf_table, tmin, tmax, n_grid=n_coarse_grid)
-    pdf_t = prob_a_of_t(t_grid, normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)
+    pdf_t = prob_a_of_t(t_grid, normalization, amin, amax, bmin, bmax, xmin, xmax, 
+                        ymin, ymax, n_obs, use_linear=use_linear
+                        )
+    if t0_anchor is not None:
+        t_grid, pdf_t = inject_zero_anchor_point(t_grid, pdf_t, t0_anchor, normalization,
+                                                amin, amax, bmin, bmax, xmin, xmax, 
+                                                ymin, ymax, n_obs, use_linear=use_linear
+                                                )
     cdf_table = cdf_from_pdf_over_grid(t_grid, pdf_t)
 
     # PASS 3: CDF-equispaced grid
     t_grid, _ = build_cdf_equispaced_t_grid(t_grid, cdf_table, tmin, tmax, n_grid=2*n_coarse_grid)
-    pdf_t = prob_a_of_t(t_grid, normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)
+    pdf_t = prob_a_of_t(t_grid, normalization, amin, amax, bmin, bmax, xmin, xmax, 
+                        ymin, ymax, n_obs, use_linear=use_linear
+                        )
     cdf_table = cdf_from_pdf_over_grid(t_grid, pdf_t)
 
     # PASS 4+: Adaptive Mesh Refinement (AMR)
     t_grid, pdf_t = adaptive_mesh_refinement_cdf(t_grid, pdf_t, normalization,
                           amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs,
-                          tol=tol, max_points=max_points)
+                          tol=tol, max_points=max_points, use_linear=use_linear
+                          )
+
+    # PASS 5: Additional Adaptive Mesh Refinement
+    cutdown = len(t_grid) // n_coarse_grid
+    t_grid = np.concatenate([t_grid[::cutdown], t_grid[-1:]])
+    pdf_t = np.concatenate([pdf_t[::cutdown], pdf_t[-1:]])
+    if t0_anchor is not None:
+        t_grid, pdf_t = inject_zero_anchor_point(t_grid, pdf_t, t0_anchor, normalization,
+                                                amin, amax, bmin, bmax, xmin, xmax, 
+                                                ymin, ymax, n_obs, use_linear=use_linear
+                                                )
+    t_grid, pdf_t = adaptive_mesh_refinement_cdf(t_grid, pdf_t, normalization,
+                        amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs,
+                        tol=tol, max_points=max_points, use_linear=use_linear
+                        )
+    # Preparing the output for use with JAX code
     t_grid = jnp.asarray(t_grid, dtype=jnp.float64)
     pdf_t = jnp.asarray(pdf_t, dtype=jnp.float64)
-    #Recomputing the CDF over the refined grid
-    a_grid = t_to_a_map(t_grid)
+    # Reconverting from `t` to `a`
+    if use_linear:
+        a_grid = amin + 0.5 * (amax - amin) * (t_grid + 1.0)
+    else:
+        a_grid = t_to_a_map(t_grid)
+    #Recomputing the CDF over the final refined grid
     cdf_table = cdf_from_pdf_over_grid(t_grid, pdf_t)
     pdf_a = prob_a(a_grid, normalization, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)
     return a_grid, cdf_table, pdf_a
 
 
 # --- Evaluate the quantile function Q(ua)=a starting from the CDF(a) LUT ---
-@partial(jax.jit, static_argnames=['normalization', 'amin', 'amax', 'bmin', 'bmax', 'xmin', 
+@jax.jit
+def quantile_a_from_cdf_table(ua, a_grid, cdf_table):
+    """
+    Finds :math:`a=CDF(u_{a})` from the linear interpolation of an existing 
+    look-up table for :math:`CDF(a)`.
+
+    Uses :func:`jnp.interp` to interpolate using the CDF(a) as `x` and the `a` as `y`
+    """
+    return jnp.interp(ua, cdf_table, a_grid)
+
+'''
+@partial(jax.jit, static_argnames=['amin', 'amax', 'bmin', 'bmax', 'xmin', 
                                    'xmax', 'ymin', 'ymax', 'n_obs', 'newton_steps'])
 def quantile_a(ua, a_grid, cdf_table, pdf_table, normalization, amin, amax, bmin, 
                bmax, xmin, xmax, ymin, ymax, n_obs, newton_steps=4):
@@ -787,166 +797,82 @@ def quantile_a(ua, a_grid, cdf_table, pdf_table, normalization, amin, amax, bmin
     a_refined, _ = jax.lax.scan(newton_step, a_init, None, length=newton_steps)
 
     return jnp.where(valid_bounds, a_refined, jnp.nan)
+'''
 
-
-
-
-
-
-## p(b|a) JAXED WITH LUTS
-@partial(jax.jit, static_argnames=['n_obs', 'n_grid'])
-def build_cdf_b_given_a_lut(a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs, n_grid=2000):
-    r"""
-    Helper function. Builds a lookup table for the CDF(b|a) evaluating it on a grid 
-    internally.
-
-    .. math::
-        CDF(b|a) = \int_{b_{min}}^{b} db^{\prime}\,\mathbb{I}(b^{\prime};b_{min},b_{max})L(a,b^{\prime};x_{min},x_{max},y_{min},y_{max})^N
-
-    Evaluates the unnormalized PDF on the grid ``linspace(bmin, bmax, n_grid)``,
-    clips to non-negative, and accumulates the probability density with the trapezoidal 
-    rule so that the resulting function is non-decreasing by construction.
-
-    Returns
-    -------
-    b_grid : 1-D array of shape ``(n_grid,)``, the grid used to build the look-up table
-    cdf    : 1-D array of shape ``(n_grid,)``, values in [0, 1]
+## JAXNS-compatible implementations
+class PriorA_UninformLinearJAXNS(SpecialPrior):
     """
-    b_grid = jnp.linspace(bmin, bmax, n_grid)
-    pdf_vals = jnp.clip(unnorm_prob_b_given_a(b_grid, a, bmin, bmax, xmin, xmax,
-                                     ymin, ymax, n_obs), 0.0, jnp.inf)
-
-    db = jnp.diff(b_grid)
-    avg_pdf = 0.5 * (pdf_vals[:-1] + pdf_vals[1:])
-    increments = avg_pdf * db                       # non-negative
-    cumulative = jnp.concatenate([jnp.zeros(1), jnp.cumsum(increments)])
-
-    normalization = cumulative[-1]
-    cdf = jnp.where(normalization > 0.0, cumulative / normalization, 0.0)
-    cdf = jnp.clip(cdf, 0.0, 1.0)
-    return b_grid, cdf
-
-
-@partial(jax.jit, static_argnames=['n_obs', 'n_grid'])
-def cdf_b_given_a_lut(b, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs, n_grid=2000):
-    r"""
-    Returns the CDF(b|a) evaluated at arbitrary **b** values for fixed **a**.
-
-    Builds an internal grid of size *n_grid*, computes the non-decreasing CDF 
-    via cumulative trapezoidal integration, and returns the CDF evaluated at the
-    requested *b* value(s) through direct index computation + linear
-    interpolation (O(1) per point).
-
-    Parameters
-    ----------
-    b      : scalar or array — query point(s)
-    n_grid : int (static) — internal grid resolution (default 2000)
+    Marginal probability :math:`\pi(a)` for the slope of the linear correlation model
     """
-    valid_bounds = (xmin <= xmax) & (ymin <= ymax) & (bmin <= bmax) & (n_obs >= 0)
-    b_grid, cdf_table = build_cdf_b_given_a_lut(a, bmin, bmax, xmin, xmax, ymin, ymax,
-                                         n_obs, n_grid)
-    # Direct index computation exploiting the uniform grid (O(1) per point).
-    t = (b - bmin) / jnp.where(bmax > bmin, bmax - bmin, 1.0)
-    t = jnp.clip(t, 0.0, 1.0)
-    idx_f = t * (n_grid - 1)
-    idx_lo = jnp.floor(idx_f).astype(jnp.int64)
-    idx_lo = jnp.clip(idx_lo, 0, n_grid - 2)
-    frac = idx_f - idx_lo
-    result = cdf_table[idx_lo] * (1.0 - frac) + cdf_table[idx_lo + 1] * frac
-    return jnp.where(valid_bounds, result, jnp.nan)
+    def __init__(self, a_grid, cdf_table, pdf_table, normalization, amin, amax, bmin, 
+                 bmax, xmin, xmax, ymin, ymax, n_obs, name=None):
+        super().__init__(name=name)
+        self.a_grid = jnp.asarray(a_grid, dtype=jnp.float64)
+        self.cdf_table = jnp.asarray(cdf_table, dtype=jnp.float64)
+        self.pdf_table = jnp.asarray(pdf_table, dtype=jnp.float64)
+        self.normalization = float(normalization)
+        self.amin = float(amin)
+        self.amax = float(amax)
+        self.bmin = float(bmin)
+        self.bmax = float(bmax)
+        self.xmin = float(xmin)
+        self.xmax = float(xmax)
+        self.ymin = float(ymin)
+        self.ymax = float(ymax)
+        self.n_obs = int(n_obs)
 
-@partial(jax.jit, static_argnames=['n_obs', 'n_grid'])
-def quantile_b_given_a_lut(u, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs, n_grid=2000):
-    r"""Quantile function :math:`b=CDF^{-1}(u|a)`.
+    def _dtype(self): return jnp.float64
+    def _base_shape(self): return ()
+    def _shape(self): return ()
 
-    Maps :math:`u \sim \mathrm{Uniform}(0,1)` to *b* such that
-    :math:`\mathrm{CDF}(b\mid a) = u`.
-
-    Internally builds a grid of size *n_grid*, computes the monotone CDF, and
-    inverts via linear interpolation
-
-    Parameters
-    ----------
-    u      : scalar or array — quantile(s) in [0, 1]
-    n_grid : int (static) — internal grid resolution (default 2000)
+    def _forward(self, U):
+        return quantile_a_from_cdf_table(U, self.a_grid, self.cdf_table)
+    
+    def _inverse(self, X):
+        # Linear interpolation of the existing LUT for CDF(a)
+        return jnp.interp(X, self.a_grid, self.cdf_table)
+    
+    def _log_prob(self, X):
+        return jnp.log(prob_a(X, self.normalization, self.amin, self.amax, self.bmin, 
+                              self.bmax, self.xmin, self.xmax, self.ymin, self.ymax, self.n_obs))
+    
+class PriorBgivenA_UninformLinearJAXNS(SpecialPrior):
     """
-    valid_bounds = (xmin <= xmax) & (ymin <= ymax) & (bmin <= bmax) & (n_obs >= 0)
-    #Creating a LUT for the CDF
-    b_grid, cdf_table = build_cdf_b_given_a_lut(a, bmin, bmax, xmin, xmax, ymin, ymax,
-                                         n_obs, n_grid)
-    result = jnp.interp(u, cdf_table, b_grid)
-    return jnp.where(valid_bounds, result, jnp.nan)
-
-
-## SCIPY IMPLEMENTATION  for CDF(b|a) FOR CROSS-CHECKS 
-def integral_unnorm_prob_b_given_a_scipy(b, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
-    """Logically identical to :func:`integral_unnorm_prob_b_given_a` but uses
-    ``scipy.integrate.quad`` instead of ``quadax.quadcc``.
-
-    This version is **not** JAX-traceable and does **not** use ``vmap``.
-    It loops over ``b`` values in plain Python, which makes it suitable as a
-    reference / cross-check implementation.
-
-    .. math::
-        F(b;a) = \\int_{b_{min}}^{b} db^{\\prime}\\,
-        \\mathbb{I}(b^{\\prime};b_{min},b_{max})\\,
-        L(a,b^{\\prime};x_{min},x_{max},y_{min},y_{max})^N
+    Conditional probability :math:`\pi(b|a)` for the intercept `b` of the linear correlation model
+    given a value of the slope `a`.
     """
-    def _integrand(b_prime):
-        return float(unnorm_prob_b_given_a(b_prime, a, bmin, bmax,
-                                           xmin, xmax, ymin, ymax, n_obs))
+    def __init__(self, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs, name=None):
+        super().__init__(name=name)
+        self.a = a
+        self.bmin, self.bmax = float(bmin), float(bmax)
+        self.xmin, self.xmax = float(xmin), float(xmax)
+        self.ymin, self.ymax = float(ymin), float(ymax)
+        self.n_obs = int(n_obs)
 
-    b = np.asarray(b, dtype=np.float64)
-    scalar_input = b.ndim == 0
-    b = np.atleast_1d(b)
+    def _dtype(self): return jnp.float64
+    def _base_shape(self): return ()
+    def _shape(self): return ()
 
-    valid_bounds = (xmin <= xmax) and (ymin <= ymax) and (bmin <= bmax) and (n_obs >= 0)
-    b_low_bound = float(jnp.maximum(bmin, ymin - jnp.maximum(a * xmin, a * xmax)))
-
-    results = np.empty_like(b)
-    for i, b_val in enumerate(b):
-        if not valid_bounds:
-            results[i] = np.nan
-        elif b_val <= b_low_bound:
-            results[i] = 0.0
-        else:
-            integral, _ = quad(_integrand, float(bmin), float(b_val),
-                               epsabs=os.sys.float_info.epsilon,
-                               epsrel=os.sys.float_info.epsilon,
-                               limit=200)
-            results[i] = max(integral, 0.0)
-
-    if scalar_input:
-        return jnp.asarray(results[0], dtype=jnp.float64)
-    return jnp.asarray(results, dtype=jnp.float64)
-
-def cdf_b_given_a_scipy(b, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs):
-    """Logically identical to :func:`cdf_b_given_a` but uses
-    ``scipy.integrate.quad`` via :func:`integral_unnorm_prob_b_given_a_scipy`.
-
-    Not JAX-traceable; intended as a reference / cross-check implementation.
-    """
-    valid_bounds = (xmin <= xmax) and (ymin <= ymax) and (bmin <= bmax) and (n_obs >= 0)
-    if not valid_bounds:
-        b = np.atleast_1d(np.asarray(b, dtype=np.float64))
-        return jnp.full_like(b, jnp.nan)
-    normalization = integral_unnorm_prob_b_given_a_scipy(bmax, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)
-    cumulative_unnorm = integral_unnorm_prob_b_given_a_scipy(b, a, bmin, bmax, xmin, xmax, ymin, ymax, n_obs)
-    ratio = jnp.where(normalization > 0.0, cumulative_unnorm / normalization, 0.0)
-    return jnp.clip(ratio, 0.0, 1.0)
-
+    def _forward(self, U):
+        return inverse_cdf_b_given_a(U, self.a, self.bmin, self.bmax, self.xmin, 
+                                        self.xmax, self.ymin, self.ymax, self.n_obs)
+    
+    def _inverse(self, X):
+        return cdf_b_given_a(X, self.a, self.bmin, self.bmax, self.xmin, 
+                                self.xmax, self.ymin, self.ymax, self.n_obs)
+    
+    def _log_prob(self, X):
+        return jnp.log(prob_b_given_a(X, self.a, self.bmin, self.bmax, self.xmin, 
+                                        self.xmax, self.ymin, self.ymax, self.n_obs))
+        
 
 ## MAIN JUST FOR TESTING
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
-    xmin = -15.0
-    xmax = jnp.log10(3.0e5)+1
-    ymin = -1.0
-    ymax = 25.0
-    amin = -jnp.inf
-    amax = jnp.inf
-    bmin = -1000
-    bmax = 1000
+    amin, amax = -jnp.inf, jnp.inf
+    bmin, bmax = -1.0e3, 1.0e3
+    xmin, xmax = jnp.log10(jnp.finfo(np.float64).eps), jnp.log10(2.99792458e5)
+    ymin, ymax = 2.0, 18.0
     Nobs = 10
 
     plt.figure('prob_x')
@@ -994,10 +920,10 @@ if __name__ == "__main__":
     b = jnp.linspace(bmin, bmax, 10000)
     for a_temp in a:
         y1 = cdf_b_given_a(b, a_temp, bmin, bmax, xmin, xmax, ymin, ymax, Nobs)
-        y2 = cdf_b_given_a_lut(b, a_temp, bmin, bmax, xmin, xmax, ymin, ymax, Nobs)
+        #y2 = cdf_b_given_a_lut(b, a_temp, bmin, bmax, xmin, xmax, ymin, ymax, Nobs)
         #y3 = cdf_b_given_a_monotone(b, a_temp, bmin, bmax, xmin, xmax, ymin, ymax, Nobs)
         plt.plot(b, y1, label=f'a={a_temp:.2f} (exact)')
-        plt.plot(b, y2, label=f'a={a_temp:.2f} (LUT)', linestyle='dashed')
+        #plt.plot(b, y2, label=f'a={a_temp:.2f} (LUT)', linestyle='dashed')
         #plt.plot(b, y3, label=f'a={a_temp:.2f} (monotone)', linestyle='dotted')
     plt.legend(loc='best')
 
@@ -1008,7 +934,6 @@ if __name__ == "__main__":
           ((a==0) & (amin<=a) & (a<=amax)) | 
           ((a>0) & (a*xmin<=ymax-bmin) & (a*xmax>=ymin-bmax) & (amin<=a) & (a<=amax))]
     b = jnp.linspace(bmin, bmax, 10000)
-    #ub = jnp.linspace(0.0, 1.0, 10000)
     ub = 0.5+0.5*jnp.sort(jnp.concatenate([-jax.nn.sigmoid(jnp.logspace(-16.0, 16.0, 5000)), jax.nn.sigmoid(jnp.logspace(-16.0, 16.0, 5000))])) # to avoid numerical issues at the edges
     # --- Plotting loop ---
     for a_temp in a:
@@ -1019,13 +944,58 @@ if __name__ == "__main__":
         plt.plot(ub, y2, label=f'a={a_temp:.2f} (root find)', linestyle='dashed')
     plt.legend(loc='best')
 
+    """
     plt.figure('unnorm_prob_a')
     print("Plotting f(a) with respect to a...")
     a = jnp.linspace(-10,10,2000)
     y = unnorm_prob_a(a, amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, Nobs)
-# --- Plotting loop ---
     plt.plot(a, y, label='f(a)')
     plt.legend(loc='best')
+    """
+
+    a_normalization = normalization_prob_a(amin, amax, bmin, bmax, xmin, xmax, ymin, ymax, Nobs, 
+                                           limit = 20*int(1e6))
+    print(f"Normalization of f(a) is {a_normalization:.3e}")
+    print("Plotting p(a)analytical and CDF(a) from look-up-table")
+    fig, axs = plt.subplots(2, 1, layout='constrained')
+    fig.suptitle(r'$CDF(a)$ from look-up-table')
+    axs_limits = [-3.0,3.0]#[-0.04, 0.04]
+    cdf_lims = [-0.1, 1.1]#[0.495, 0.505]
+    #pdf_lims = [0.064, 0.073]
+
+    a_grid, cdf_table, pdf_table = build_cdf_a_lut(a_normalization, amin, amax, bmin, bmax, xmin, 
+                                                   xmax, ymin, ymax, Nobs, n_coarse_grid=1000, 
+                                                   tol=jnp.finfo(np.float64).eps, 
+                                                   max_points=5*int(1e6), use_linear=False
+                                                   )
+    axs[0].plot(a_grid, pdf_table, label=r'$\pi(a) analytical$', color='red'#, 
+                #marker='.', markersize=2.0, markerfacecolor='black', markeredgecolor='black'
+                )
+    axs[0].set_ylabel(r'$\pi(a)$')
+    #axs[0].set_ylim(pdf_lims)
+    axs[1].plot(a_grid, cdf_table, label=r'$CDF(a)$ LUT', color='red'#, 
+                #marker='.', markersize=2.0, markerfacecolor='black', markeredgecolor='black'
+                )
+    axs[1].set_xlabel(r'$a$')
+    axs[1].set_ylabel(r'$CDF(a)$')
+    axs[1].set_ylim(cdf_lims)
+    axs[1].axhline(0.0, color='black', linestyle='dotted', linewidth=1.0)
+    axs[1].axhline(1.0, color='black', linestyle='dotted', linewidth=1.0)
+    for ax in axs:
+        ax.set_xlim(axs_limits)
+        ax.axvline(0.0, color='black', linestyle='dashed', linewidth=1.0)
+        ax.legend(loc='best')
+
+
+    ua = jnp.linspace(0.0, 1.0, 10000)
+    a_from_ua = quantile_a_from_cdf_table(ua, a_grid, cdf_table)
+
+    fig_quantile, ax_quantile = plt.subplots(1,1,layout='constrained')
+    fig_quantile.suptitle('Quantile function from look-up-table')
+    ax_quantile.plot(ua, a_from_ua, label=r'$Q(u_a)$ from LUT', color='red')
+    ax_quantile.set_xlabel(r'$u_a$')
+    ax_quantile.set_ylabel(r'$a$')
+    ax_quantile.legend(loc='best')
 
     plt.show()
     exit()
