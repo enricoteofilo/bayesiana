@@ -14,7 +14,7 @@ random = jax.random
 grad = jax.grad
 jit = jax.jit
 vmap = jax.vmap
-from jaxns import Prior, Model, NestedSampler
+from jaxns import Prior, Model, NestedSampler, resample
 import tensorflow_probability.substrates.jax as tfp
 tfpd = tfp.distributions
 import matplotlib.pyplot as plt
@@ -25,16 +25,58 @@ from uninformative_prior_linear import (PriorA_UninformLinearJAXNS,
                                         build_cdf_a_lut,
                                         x_bounds_scalars
                                         )
+from my_models import linear_correlation
 
 DEBUG = False
 
-@jit
-def linear_correlation_exp(sigma_gc, a, b):
-    return jnp.power(10.0, b) * jnp.power(sigma_gc/200.0, a)
 
-@jit
-def linear_correlation(sigma_gc, a, b):
-    return b + a * jnp.log10(sigma_gc/200.0)
+def linear_uninformative_gaussian(M, M_equiv_err, sigma_gc, sigma_gc_equiv_err):
+    N_bh = len(M)
+    amin, amax = -1.0e3, 1.0e3
+    bmin, bmax = -1.0e6, 1.0e6
+    log_sigma_gc_min, log_sigma_gc_max = -3.0-jnp.log10(200.0), jnp.log10(2.99792458e5) - jnp.log10(200.0) #
+    log_M_min, log_M_max = 2.0, 18.0
+
+    a_normalization = normalization_prob_a(amin, amax, bmin, bmax, log_sigma_gc_min, log_sigma_gc_max, 
+                                           log_M_min, log_M_max, N_bh, limit = 20*int(1e6)
+                                           )
+    
+    if not np.isfinite(amin) or not np.isfinite(amax): use_linear = False
+    else: use_linear = True
+    
+    a_grid, cdf_table, pdf_table = build_cdf_a_lut(a_normalization, amin, amax, bmin, bmax, log_sigma_gc_min, 
+                                                   log_sigma_gc_max, log_M_min, log_M_max, N_bh, n_coarse_grid=1000, 
+                                                    tol=jnp.finfo(np.float64).eps, 
+                                                    max_points=5*int(1e6), use_linear=use_linear
+                                                    )
+    
+    @jit
+    def log_likelihood_normal(a, b, log_true_sigma_gc):
+        predicted_M = 10**linear_correlation(log_true_sigma_gc, a, b)
+        true_sigma_gc = 10**(log_true_sigma_gc+jnp.log10(200.0))
+        log_like = jnp.sum(
+            tfpd.Normal(predicted_M, M_equiv_err).log_prob(M)
+            + tfpd.Normal(true_sigma_gc, sigma_gc_equiv_err).log_prob(sigma_gc)
+        )
+        return log_like
+    
+    def prior_linear_uninformative():
+        a = yield PriorA_UninformLinearJAXNS(a_grid, cdf_table, pdf_table, a_normalization, amin, 
+                                             amax, bmin, bmax, log_sigma_gc_min, log_sigma_gc_max, 
+                                             log_M_min, log_M_max, N_bh, name=r"$a$")
+        b = yield PriorBgivenA_UninformLinearJAXNS(a, bmin, bmax, log_sigma_gc_min, log_sigma_gc_max, 
+                                                log_M_min, log_M_max, N_bh, name=r"$b$")
+        log_sigma_gc_low, log_sigma_gc_high = x_bounds_scalars(a,b,log_sigma_gc_min, log_sigma_gc_max, log_M_min, log_M_max)
+        log_true_sigma_gc = yield Prior(tfpd.Sample(tfpd.Uniform(log_sigma_gc_low, log_sigma_gc_high), 
+                                                sample_shape=(N_bh,)), name=r"$\log\left(\frac{\sigma_{gc}^{true}}{200\,\rm{km/s}}\right)$")
+        return a, b, log_true_sigma_gc
+    
+    model = Model(prior_linear_uninformative, log_likelihood_normal)
+    model.sanity_check(random.PRNGKey(0), S=10)
+
+    jaxns_istance = NestedSampler(model, k=model.U_ndims, num_live_points=model.U_ndims*2000, #parameter_estimation=True, 
+                       difficult_model=True, verbose=True)
+    return jaxns_istance
 
 if __name__ == "__main__":
     bh_data = import_bh_data("data/bh_table_1.txt")
@@ -55,55 +97,20 @@ if __name__ == "__main__":
     sigma_gc_equiv_err = 0.5*(bh_data["sigma_gc_low"]+bh_data["sigma_gc_high"])
     N_bh = len(M)
 
-    amin, amax = -jnp.inf, jnp.inf
-    bmin, bmax = -1.0e3, 1.0e3
-    log_sigma_gc_min, log_sigma_gc_max = jnp.log10(jnp.finfo(np.float64).eps), jnp.log10(2.99792458e5)
-    log_M_min, log_M_max = 2.0, 18.0
-
-    a_normalization = normalization_prob_a(amin, amax, bmin, bmax, log_sigma_gc_min, log_sigma_gc_max, 
-                                           log_M_min, log_M_max, N_bh, limit = 20*int(1e6)
-                                           )
+    jaxns_istance = linear_uninformative_gaussian(M, M_equiv_err, sigma_gc, sigma_gc_equiv_err)
     
-    a_grid, cdf_table, pdf_table = build_cdf_a_lut(a_normalization, amin, amax, bmin, bmax, log_sigma_gc_min, 
-                                                   log_sigma_gc_max, log_M_min, log_M_max, N_bh, n_coarse_grid=1000, 
-                                                    tol=jnp.finfo(np.float64).eps, 
-                                                    max_points=5*int(1e6), use_linear=False
-                                                    )
-
-    @jit
-    def log_likelihood_normal(a, b, true_sigma_gc):
-        predicted_M = jnp.exp(linear_correlation(true_sigma_gc, a, b))
-        log_like = jnp.sum(
-            tfpd.Normal(predicted_M, M_equiv_err).log_prob(M)
-            + tfpd.Normal(true_sigma_gc, sigma_gc_equiv_err).log_prob(sigma_gc)
-        )
-        return log_like
-    
-    def prior_linear_uninformative():
-        a = yield PriorA_UninformLinearJAXNS(a_grid, cdf_table, pdf_table, a_normalization, amin, 
-                                             amax, bmin, bmax, log_sigma_gc_min, log_sigma_gc_max, 
-                                             log_M_min, log_M_max, N_bh, name="a")
-        b = yield PriorBgivenA_UninformLinearJAXNS(a, bmin, bmax, log_sigma_gc_min, log_sigma_gc_max, 
-                                                log_M_min, log_M_max, N_bh, name="b")
-        x_low, x_high = x_bounds_scalars(a,b,log_sigma_gc_min, log_sigma_gc_max, log_M_min, log_M_max)
-        true_sigma_gc = yield Prior(tfpd.Sample(tfpd.Uniform(10**log_sigma_gc_min, 10**log_sigma_gc_max), 
-                                                sample_shape=(N_bh,)), name=r"\sigma_{gc}^{true}")
-        return a, b, true_sigma_gc
-    
-    model = Model(prior_linear_uninformative, log_likelihood_normal)
-    model.sanity_check(random.PRNGKey(0), S=10)
-
-    ns = NestedSampler(model, s=1000, k=model.U_ndims, num_live_points=model.U_ndims*1000)
-    termination_reason, state = jax.jit(ns)(random.PRNGKey(2))
-    results = ns.to_results(termination_reason, state=state)
-    save_nested_sampler_results(results, "results/gaussian_uninformative_ns_results.pkl")
-    np.savez("results/gaussian_uninformative_ns_results.npz",
+    termination_reason, state = jax.jit(jaxns_istance)(random.PRNGKey(2))
+    results = jaxns_istance.to_results(termination_reason, state=state)
+    save_nested_sampler_results(results, "results/gaussian_uninformative_jaxns_results.pkl")
+    save_nested_sampler_results(termination_reason, "results/gaussian_uninformative_jaxns_termination.pkl")
+    save_nested_sampler_results(state, "results/gaussian_uninformative_jaxns_state.pkl")
+    np.savez("results/gaussian_uninformative_jaxns_npz.npz",
          log_Z=np.asarray(results.log_Z_mean),
          log_L=np.asarray(results.log_L_samples),
          U=np.asarray(results.U_samples))
     #posterior = resample(random.PRNGKey(1), results, S=5000)
-    ns.summary(results)
-    ns.plot_diagnostics(results)
-    ns.plot_cornerplot(results, save_name='results/gaussian_uninformative_full_corner.png')
+    jaxns_istance.summary(results)
+    jaxns_istance.plot_diagnostics(results)
+    jaxns_istance.plot_cornerplot(results, save_name='results/gaussian_uninformative_jaxns_corner.png')
 
     exit()

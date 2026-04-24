@@ -200,4 +200,3 @@ def kbn_cumsum_jax(increments):
     # array using `jax.lax.scan`
     _, summation = jax.lax.scan(iterative_block, init, increments[1:])
     return jnp.concatenate([jnp.zeros(1, dtype=jnp.float64), summation])
-

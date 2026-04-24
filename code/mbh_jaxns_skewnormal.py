@@ -25,6 +25,7 @@ from uninformative_prior_linear import (PriorA_UninformLinearJAXNS,
                                         build_cdf_a_lut,
                                         x_bounds_scalars
                                         )
+from utils import linear_correlation_exp, linear_correlation
 
 DEBUG = False
 
