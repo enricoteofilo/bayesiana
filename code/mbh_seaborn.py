@@ -28,8 +28,7 @@ tfpd = tfp.distributions
 import matplotlib.pyplot as plt
 from utils import load_nested_sampler_results, import_bh_data
 from my_models import  linear_correlation
-from mbh_jaxns_newprior_normal import linear_uninformative_gaussian
-from mbh_jaxns_newprior_normal_all import linear_uninformative_gaussian_all
+from code.mbh_jaxns_newprior_normal import linear_uninformative_gaussian_all
 import seaborn as sns
 import pandas as pd
 

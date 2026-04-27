@@ -28,14 +28,13 @@ tfpd = tfp.distributions
 import matplotlib.pyplot as plt
 from utils import load_nested_sampler_results, import_bh_data
 from my_models import  linear_correlation
-from mbh_jaxns_newprior_normal import linear_uninformative_gaussian
-from mbh_jaxns_newprior_normal_all import linear_uninformative_gaussian_all
+from code.mbh_jaxns_newprior_normal import linear_uninformative_gaussian_all
 import seaborn as sns
 
 DEBUG = False
 
 if __name__ == "__main__":
-    bh_data = import_bh_data("data/bh_table_1.txt")
+    bh_data = import_bh_data("data/bh_table_1_all.txt")
     print(f"Loaded columns: {list(bh_data.keys())}")
     if DEBUG:
         for key in bh_data.keys():

@@ -869,17 +869,30 @@ class PriorBgivenA_UninformLinearJAXNS(SpecialPrior):
 ## MAIN JUST FOR TESTING
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
+    Nobs = 12
     amin, amax = -jnp.inf, jnp.inf
-    bmin, bmax = -1.0e3, 1.0e3
-    xmin, xmax = jnp.log10(jnp.finfo(np.float64).eps), jnp.log10(2.99792458e5)
-    ymin, ymax = 2.0, 18.0
-    Nobs = 10
+    bmin, bmax = -1/(10*jnp.finfo(jnp.float64).eps), 1/(10*jnp.finfo(jnp.float64).eps)
+    xmin, xmax = -3.0-jnp.log10(200.0), jnp.log10(2.99792458e5) - jnp.log10(200.0) #
+    ymin, ymax = 0.0, 18.0
+
+    a_normalization = normalization_prob_a(amin, amax, bmin, bmax, xmin, xmax, 
+                                           ymin, ymax, Nobs, limit = int(1e8)
+                                           )
+    
+    if not np.isfinite(amin) or not np.isfinite(amax): use_linear = False
+    else: use_linear = True
+    
+    a_grid, cdf_table, pdf_table = build_cdf_a_lut(a_normalization, amin, amax, bmin, bmax, xmin, 
+                                                   xmax, ymin, ymax, Nobs, n_coarse_grid=1000, 
+                                                    tol=jnp.finfo(np.float64).eps, 
+                                                    max_points=int(1e7), use_linear=use_linear
+                                                    )
 
     plt.figure('prob_x')
     plt.title('p(x|a,b) for different values of a')
     print("Plotting p(x|a,b) for different values of a...")
     x = jnp.linspace(xmin-5.0, xmax+5.0, 1000)
-    a = jnp.logspace(-1.5,1.0,10)
+    a = jnp.logspace(-5.0,5.0,10)
     b = 2.0
     for a_temp in a:
         prob_x_ab = prob_x_given_ab(x,a_temp,b,xmin,xmax,ymin,ymax)
@@ -890,7 +903,7 @@ if __name__ == "__main__":
     plt.figure('prob_b_unnorm')
     plt.title('unnormalized p(b|a) for different values of a')
     print("Plotting p(b|a) for different values of a...")
-    a = jnp.logspace(-1.5,1.0,10)
+    a = jnp.logspace(-5.0,5.0,10)
     b = jnp.linspace(bmin, bmax, 2500)
     for a_temp in a:
         y = unnorm_prob_b_given_a(b, a_temp, bmin, bmax, xmin, xmax, ymin, ymax, Nobs)
@@ -900,7 +913,7 @@ if __name__ == "__main__":
     plt.figure('prob_b')
     print("Plotting p(b|a) for different values of a...")
     plt.title('p(b|a) for different values of a')
-    a = jnp.linspace(1.25,3.75,10)
+    a = jnp.logspace(-5.0,5.0,10)
     a = a[((a<0) & (a*xmin>=ymin-bmax) & (a*xmax<=ymax-bmin) & (amin<=a) & (a<=amax)) |
           ((a==0) & (amin<=a) & (a<=amax)) | 
           ((a>0) & (a*xmin<=ymax-bmin) & (a*xmax>=ymin-bmax) & (amin<=a) & (a<=amax))]
@@ -913,7 +926,7 @@ if __name__ == "__main__":
     plt.figure('conditional_cdf_b')
     print("Plotting CDF(b|a) for different values of a...")
     plt.title('CDF(b|a) for different values of a')
-    a = jnp.linspace(1.25,3.75,10)
+    a = jnp.logspace(-5.0,5.0,10)
     a = a[((a<0) & (a*xmin>=ymin-bmax) & (a*xmax<=ymax-bmin) & (amin<=a) & (a<=amax)) |
           ((a==0) & (amin<=a) & (a<=amax)) | 
           ((a>0) & (a*xmin<=ymax-bmin) & (a*xmax>=ymin-bmax) & (amin<=a) & (a<=amax))]
@@ -929,7 +942,7 @@ if __name__ == "__main__":
 
     plt.figure('expected_quantile_function_b')
     print("Plotting CDF^{-1}(b|u,a) for different values of a...")
-    a = jnp.linspace(1.25,3.75,10)
+    a = jnp.logspace(-5.0,5.0,10)
     a = a[((a<0) & (a*xmin>=ymin-bmax) & (a*xmax<=ymax-bmin) & (amin<=a) & (a<=amax)) |
           ((a==0) & (amin<=a) & (a<=amax)) | 
           ((a>0) & (a*xmin<=ymax-bmin) & (a*xmax>=ymin-bmax) & (amin<=a) & (a<=amax))]
@@ -959,7 +972,7 @@ if __name__ == "__main__":
     print("Plotting p(a)analytical and CDF(a) from look-up-table")
     fig, axs = plt.subplots(2, 1, layout='constrained')
     fig.suptitle(r'$CDF(a)$ from look-up-table')
-    axs_limits = [-3.0,3.0]#[-0.04, 0.04]
+    axs_limits = [-15.0,15.0]#[-0.04, 0.04]
     cdf_lims = [-0.1, 1.1]#[0.495, 0.505]
     #pdf_lims = [0.064, 0.073]
 

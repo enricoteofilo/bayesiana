@@ -26,13 +26,17 @@ from uninformative_prior_linear import (PriorA_UninformLinearJAXNS,
                                         x_bounds_scalars
                                         )
 from my_models import linear_correlation
+from my_distributions import skewnormal_logpdf
 import seaborn as sns
 
 DEBUG = False
 
 
-def linear_uninformative_gaussian_all(galaxy_names, M, M_equiv_err, sigma_gc, sigma_gc_equiv_err):
+def linear_uninformative_logskewnormal(galaxy_names, M, M_equiv_err, sigma_gc, sigma_gc_equiv_err):
     unique_names, inverse, counts = np.unique(galaxy_names, return_inverse=True, return_counts=True)
+    log_M_loc, log_M_scale, log_M_shape = np.loadtxt("results/logskewnormal_params_M.txt", unpack=True)
+    log_sigma_loc, log_sigma_scale, log_sigma_shape = np.loadtxt("results/logskewnormal_params_sigma_gc.txt", unpack=True)
+
     weights = jnp.asarray(1.0 / counts[inverse].astype(np.float64), dtype=jnp.float64)
     N_bh = len(unique_names)
     amin, amax = -jnp.inf, jnp.inf
@@ -41,7 +45,7 @@ def linear_uninformative_gaussian_all(galaxy_names, M, M_equiv_err, sigma_gc, si
     log_M_min, log_M_max = 0.0, 18.0
 
     a_normalization = normalization_prob_a(amin, amax, bmin, bmax, log_sigma_gc_min, log_sigma_gc_max, 
-                                           log_M_min, log_M_max, N_bh, limit = 20*int(1e6)
+                                           log_M_min, log_M_max, N_bh, limit = int(1e8)
                                            )
     
     if not np.isfinite(amin) or not np.isfinite(amax): use_linear = False
@@ -50,16 +54,16 @@ def linear_uninformative_gaussian_all(galaxy_names, M, M_equiv_err, sigma_gc, si
     a_grid, cdf_table, pdf_table = build_cdf_a_lut(a_normalization, amin, amax, bmin, bmax, log_sigma_gc_min, 
                                                    log_sigma_gc_max, log_M_min, log_M_max, N_bh, n_coarse_grid=1000, 
                                                     tol=jnp.finfo(np.float64).eps, 
-                                                    max_points=5*int(1e6), use_linear=use_linear
+                                                    max_points=int(1e7), use_linear=use_linear
                                                     )
     
     @jit
-    def log_likelihood_normal(a, b, log_true_sigma_gc):
-        predicted_M = 10**linear_correlation(log_true_sigma_gc[inverse], a, b)
-        true_sigma_gc = 10**(log_true_sigma_gc[inverse]+jnp.log10(200.0))
+    def log_likelihood_logskewnormal(a, b, log_true_sigma_gc):
+        log_predicted_M = linear_correlation(log_true_sigma_gc[inverse], a, b)*jnp.log(10.0)
+        rescaled_true_sigma_gc = (log_true_sigma_gc[inverse]+jnp.log10(200.0))*jnp.log(10.0)
         log_like = jnp.sum(
-            tfpd.Normal(predicted_M, M_equiv_err).log_prob(M)
-            + tfpd.Normal(true_sigma_gc, sigma_gc_equiv_err).log_prob(sigma_gc)
+            skewnormal_logpdf(jnp.log(M), loc=log_predicted_M, scale=log_M_scale, shape=log_M_shape)
+            + skewnormal_logpdf(jnp.log(sigma_gc), loc=rescaled_true_sigma_gc, scale=log_sigma_scale, shape=log_sigma_shape)
             + jnp.log(weights)
         )
         return log_like
@@ -75,10 +79,10 @@ def linear_uninformative_gaussian_all(galaxy_names, M, M_equiv_err, sigma_gc, si
                                                 sample_shape=(N_bh,)), name=r"$\log\left(\frac{\sigma_{gc}^{true}}{200\,\rm{km/s}}\right)$")
         return a, b, log_true_sigma_gc
     
-    model = Model(prior_linear_uninformative, log_likelihood_normal)
+    model = Model(prior_linear_uninformative, log_likelihood_logskewnormal)
     model.sanity_check(random.PRNGKey(0), S=10)
 
-    jaxns_istance = NestedSampler(model, k=model.U_ndims, num_live_points=model.U_ndims*1000, #parameter_estimation=True, 
+    jaxns_istance = NestedSampler(model, k=model.U_ndims, num_live_points=model.U_ndims*10000,
                        difficult_model=True, verbose=True)
     return jaxns_istance
 
@@ -98,20 +102,20 @@ if __name__ == "__main__":
     sigma_gc_equiv_err = 0.5*(bh_data["sigma_gc_low"]+bh_data["sigma_gc_high"])
     galaxy_names = bh_data["Galaxy"]
 
-    jaxns_istance = linear_uninformative_gaussian_all(galaxy_names, M, M_equiv_err, sigma_gc, sigma_gc_equiv_err)
+    jaxns_istance = linear_uninformative_logskewnormal(galaxy_names, M, M_equiv_err, sigma_gc, sigma_gc_equiv_err)
     
     termination_reason, state = jax.jit(jaxns_istance)(random.PRNGKey(2))
     results = jaxns_istance.to_results(termination_reason, state=state)
-    save_nested_sampler_results(results, "results/gaussian_uninformative_jaxns_results.pkl")
-    save_nested_sampler_results(termination_reason, "results/gaussian_uninformative_jaxns_termination.pkl")
-    save_nested_sampler_results(state, "results/gaussian_uninformative_jaxns_state.pkl")
-    np.savez("results/gaussian_uninformative_jaxns_npz.npz",
+    save_nested_sampler_results(results, "results/logskewnormal_uninformative_jaxns_results.pkl")
+    save_nested_sampler_results(termination_reason, "results/logskewnormal_uninformative_jaxns_termination.pkl")
+    save_nested_sampler_results(state, "results/logskewnormal_uninformative_jaxns_state.pkl")
+    np.savez("results/logskewnormal_uninformative_jaxns_npz.npz",
          log_Z=np.asarray(results.log_Z_mean),
          log_L=np.asarray(results.log_L_samples),
          U=np.asarray(results.U_samples))
     #posterior = resample(random.PRNGKey(1), results, S=5000)
     jaxns_istance.summary(results)
-    jaxns_istance.plot_cornerplot(results, save_name='results/gaussian_uninformative_jaxns_corner.png')
+    jaxns_istance.plot_cornerplot(results, save_name='results/logskewnormal_uninformative_jaxns_corner.png')
     jaxns_istance.plot_diagnostics(results)
 
     exit()
