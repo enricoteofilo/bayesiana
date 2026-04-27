@@ -74,7 +74,7 @@ def solve_logskewnormal_mode_quantiles(log_mode, log_left_edge, log_right_edge):
 batch_solver = jit(vmap(solve_logskewnormal_mode_quantiles, in_axes=(0, 0, 0)))
 
 if __name__ == "__main__":
-    bh_data = import_bh_data("./data/bh_table_1.txt")
+    bh_data = import_bh_data("./data/bh_table_1_all.txt")
     print(f"Loaded columns: {list(bh_data.keys())}")
     if DEBUG:
         for key in bh_data.keys():

@@ -31,8 +31,10 @@ import seaborn as sns
 DEBUG = False
 
 
-def linear_uninformative_gaussian(M, M_equiv_err, sigma_gc, sigma_gc_equiv_err):
-    N_bh = len(M)
+def linear_uninformative_gaussian_all(galaxy_names, M, M_equiv_err, sigma_gc, sigma_gc_equiv_err):
+    unique_names, inverse, counts = np.unique(galaxy_names, return_inverse=True, return_counts=True)
+    weights = jnp.asarray(1.0 / counts[inverse].astype(np.float64), dtype=jnp.float64)
+    N_bh = len(unique_names)
     amin, amax = -jnp.inf, jnp.inf
     bmin, bmax = -1/(10*jnp.finfo(jnp.float64).eps), 1/(10*jnp.finfo(jnp.float64).eps)
     log_sigma_gc_min, log_sigma_gc_max = -3.0-jnp.log10(200.0), jnp.log10(2.99792458e5) - jnp.log10(200.0) #
@@ -53,11 +55,12 @@ def linear_uninformative_gaussian(M, M_equiv_err, sigma_gc, sigma_gc_equiv_err):
     
     @jit
     def log_likelihood_normal(a, b, log_true_sigma_gc):
-        predicted_M = 10**linear_correlation(log_true_sigma_gc, a, b)
-        true_sigma_gc = 10**(log_true_sigma_gc+jnp.log10(200.0))
+        predicted_M = 10**linear_correlation(log_true_sigma_gc[inverse], a, b)
+        true_sigma_gc = 10**(log_true_sigma_gc[inverse]+jnp.log10(200.0))
         log_like = jnp.sum(
             tfpd.Normal(predicted_M, M_equiv_err).log_prob(M)
             + tfpd.Normal(true_sigma_gc, sigma_gc_equiv_err).log_prob(sigma_gc)
+            + jnp.log(weights)
         )
         return log_like
     
@@ -75,12 +78,12 @@ def linear_uninformative_gaussian(M, M_equiv_err, sigma_gc, sigma_gc_equiv_err):
     model = Model(prior_linear_uninformative, log_likelihood_normal)
     model.sanity_check(random.PRNGKey(0), S=10)
 
-    jaxns_istance = NestedSampler(model, k=model.U_ndims, num_live_points=model.U_ndims*10000, #parameter_estimation=True, 
+    jaxns_istance = NestedSampler(model, k=model.U_ndims, num_live_points=model.U_ndims*1000, #parameter_estimation=True, 
                        difficult_model=True, verbose=True)
     return jaxns_istance
 
 if __name__ == "__main__":
-    bh_data = import_bh_data("data/bh_table_1.txt")
+    bh_data = import_bh_data("data/bh_table_1_all.txt")
     print(f"Loaded columns: {list(bh_data.keys())}")
     if DEBUG:
         for key in bh_data.keys():
@@ -89,16 +92,13 @@ if __name__ == "__main__":
             except:
                 print(f"{key} type: {type(bh_data[key][0])}")
 
-    print(bh_data["sigma_gc"])
-    print(bh_data["M"])
-
     M = bh_data["M"]
     sigma_gc = bh_data["sigma_gc"]
     M_equiv_err = 0.5*(bh_data["dM_low"]+bh_data["dM_high"])
     sigma_gc_equiv_err = 0.5*(bh_data["sigma_gc_low"]+bh_data["sigma_gc_high"])
-    N_bh = len(M)
+    galaxy_names = bh_data["Galaxy"]
 
-    jaxns_istance = linear_uninformative_gaussian(M, M_equiv_err, sigma_gc, sigma_gc_equiv_err)
+    jaxns_istance = linear_uninformative_gaussian_all(galaxy_names, M, M_equiv_err, sigma_gc, sigma_gc_equiv_err)
     
     termination_reason, state = jax.jit(jaxns_istance)(random.PRNGKey(2))
     results = jaxns_istance.to_results(termination_reason, state=state)

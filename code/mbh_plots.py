@@ -29,6 +29,8 @@ import matplotlib.pyplot as plt
 from utils import load_nested_sampler_results, import_bh_data
 from my_models import  linear_correlation
 from mbh_jaxns_newprior_normal import linear_uninformative_gaussian
+from mbh_jaxns_newprior_normal_all import linear_uninformative_gaussian_all
+import seaborn as sns
 
 DEBUG = False
 
@@ -49,7 +51,6 @@ if __name__ == "__main__":
     sigma_gc = bh_data["sigma_gc"]
     M_equiv_err = 0.5*(bh_data["dM_low"]+bh_data["dM_high"])
     sigma_gc_equiv_err = 0.5*(bh_data["sigma_gc_low"]+bh_data["sigma_gc_high"])
-    N_bh = len(M)
 
     plt.figure('bh_data', figsize=(6, 4), dpi=600)
     plt.title(r'Acquired data for $M_{BH}-\sigma_{gc}$ correlation')
@@ -70,7 +71,7 @@ if __name__ == "__main__":
     ### --- LINEAR MODEL + GAUSSIAN LIKELIHOOD
 
 
-    gaussian_uninformative_jaxns = linear_uninformative_gaussian(M, M_equiv_err, sigma_gc, sigma_gc_equiv_err)
+    gaussian_uninformative_jaxns = linear_uninformative_gaussian_all(bh_data["Galaxy"],M, M_equiv_err, sigma_gc, sigma_gc_equiv_err)
 
     gaussian_uninformative_jaxns_results = load_nested_sampler_results("results/gaussian_uninformative_jaxns_results.pkl")
     gaussian_uninformative_jaxns_termination = load_nested_sampler_results("results/gaussian_uninformative_jaxns_termination.pkl")
@@ -92,6 +93,8 @@ if __name__ == "__main__":
         )
     print(linear_uninformative_gaussian_jaxns_posterior_samples.keys())
 
+
+    ### --- POSTERIOR PREDICTIVE PLOT: LINEAR MODEL + GAUSSIAN LIKELIHOOD ---
     linear_uninformative_gaussian_jaxns_corrfig, linear_uninformative_gaussian_jaxns_axs = plt.subplots(
         1, 1, figsize=(16, 9), dpi=150)
     linear_uninformative_gaussian_jaxns_corrfig.suptitle(r'$M_{BH}-\sigma_{gc}$ correlation: linear model'+
@@ -103,7 +106,7 @@ if __name__ == "__main__":
                                                     label='Observed Data', markersize=4.0, capsize=2.0, 
                                                     linestyle='None', color='black', alpha=0.95)
     print([att for att in dir(gaussian_uninformative_jaxns_results) if not att.startswith("_")])
-    x_arr = np.logspace(np.log10(50), np.log10(500), 1000)
+    x_arr = np.logspace(np.log10(50), np.log10(500), 10)
     a_samples = linear_uninformative_gaussian_jaxns_posterior_samples["$a$"]
     b_samples = linear_uninformative_gaussian_jaxns_posterior_samples["$b$"]
     @jax.jit
@@ -125,7 +128,8 @@ if __name__ == "__main__":
     linear_uninformative_gaussian_jaxns_axs.set_ylim(1e6, 1e10)
     linear_uninformative_gaussian_jaxns_axs.set_xscale('log')
     linear_uninformative_gaussian_jaxns_axs.set_yscale('log')
-    
     plt.show()
-    plt.close()
+
+
     exit()
+    
