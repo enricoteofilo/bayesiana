@@ -59,7 +59,6 @@ def linear_uninformative_logsplitnormal(galaxy_names, M, M_left, M_right, sigma_
         log_like = jnp.sum(
             tfpd.TwoPieceNormal(log_predicted_M, 
                                 jnp.sqrt((jnp.log(M_right+M)-jnp.log(M))*(jnp.log(M)-jnp.log(M-M_left))), 
-                                jnp.sqrt((jnp.log(M_right+M)-jnp.log(M))*(jnp.log(M)-jnp.log(M-M_left))), 
                                 jnp.sqrt((jnp.log(M_right+M)-jnp.log(M))/(jnp.log(M)-jnp.log(M-M_left)))).
                                 log_prob(jnp.log(M))
             + tfpd.TwoPieceNormal(rescaled_true_sigma_gc, 
@@ -84,7 +83,7 @@ def linear_uninformative_logsplitnormal(galaxy_names, M, M_left, M_right, sigma_
     model = Model(prior_linear_uninformative, log_likelihood_logskewnormal)
     model.sanity_check(random.PRNGKey(0), S=10)
 
-    jaxns_istance = NestedSampler(model, k=model.U_ndims, num_live_points=model.U_ndims*100,
+    jaxns_istance = NestedSampler(model, k=model.U_ndims, num_live_points=model.U_ndims*10000,
                        difficult_model=True, verbose=True)
     return jaxns_istance
 
