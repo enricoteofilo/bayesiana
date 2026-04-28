@@ -57,8 +57,15 @@ def linear_uninformative_logsplitnormal(galaxy_names, M, M_left, M_right, sigma_
         log_predicted_M = linear_correlation(log_true_sigma_gc[inverse], a, b)*jnp.log(10.0)
         rescaled_true_sigma_gc = (log_true_sigma_gc[inverse]+jnp.log10(200.0))*jnp.log(10.0)
         log_like = jnp.sum(
-            tfpd.TwoPieceNormal(log_predicted_M, jnp.sqrt(jnp.log(M_right)*jnp.log(M_left)), jnp.sqrt(jnp.log(M_right)/jnp.log(M_left))).log_prob(jnp.log(M))
-            + tfpd.TwoPieceNormal(rescaled_true_sigma_gc, jnp.sqrt(jnp.log(sigma_gc_right)*jnp.log(sigma_gc_left)), jnp.sqrt(jnp.log(sigma_gc_right)/jnp.log(sigma_gc_left))).log_prob(jnp.log(sigma_gc))
+            tfpd.TwoPieceNormal(log_predicted_M, 
+                                jnp.sqrt((jnp.log(M_right+M)-jnp.log(M))*(jnp.log(M)-jnp.log(M-M_left))), 
+                                jnp.sqrt((jnp.log(M_right+M)-jnp.log(M))*(jnp.log(M)-jnp.log(M-M_left))), 
+                                jnp.sqrt((jnp.log(M_right+M)-jnp.log(M))/(jnp.log(M)-jnp.log(M-M_left)))).
+                                log_prob(jnp.log(M))
+            + tfpd.TwoPieceNormal(rescaled_true_sigma_gc, 
+                                  jnp.sqrt((jnp.log(sigma_gc_right+sigma_gc)-jnp.log(sigma_gc))*(jnp.log(sigma_gc)-jnp.log(sigma_gc-sigma_gc_left))), 
+                                  jnp.sqrt((jnp.log(sigma_gc_right+sigma_gc)-jnp.log(sigma_gc))/(jnp.log(sigma_gc)-jnp.log(sigma_gc-sigma_gc_left)))).
+                                  log_prob(jnp.log(sigma_gc))
             + jnp.log(weights)
         )
         return log_like
@@ -77,7 +84,7 @@ def linear_uninformative_logsplitnormal(galaxy_names, M, M_left, M_right, sigma_
     model = Model(prior_linear_uninformative, log_likelihood_logskewnormal)
     model.sanity_check(random.PRNGKey(0), S=10)
 
-    jaxns_istance = NestedSampler(model, k=model.U_ndims, num_live_points=model.U_ndims*10000,
+    jaxns_istance = NestedSampler(model, k=model.U_ndims, num_live_points=model.U_ndims*100,
                        difficult_model=True, verbose=True)
     return jaxns_istance
 
